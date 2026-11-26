@@ -158,10 +158,12 @@ def select_market(payload, reply):
         if not isinstance(m, dict):
             raise TypeError("Unexpected market metadata.")
         ticker = m.get("ticker")
-        match = TICKER.fullmatch(ticker) if isinstance(ticker, str) else None
+        event = m.get("event_ticker")
         if (
-            not match
-            or m.get("event_ticker") != match[1]
+            not isinstance(ticker, str)
+            or not ticker.startswith("KXBTC15M-")
+            or not isinstance(event, str)
+            or not event.startswith("KXBTC15M-")
             or m.get("status") != "active"
         ):
             continue
@@ -171,6 +173,9 @@ def select_market(payload, reply):
         )
         if not opened <= reply.seen < closed:
             continue
+        match = TICKER.fullmatch(ticker)
+        if not match or event != match[1]:
+            raise ValueError("The active BTC contract has an unrecognized identifier.")
         # The venue identifies the Eastern closing quarter in both ticker segments.
         end = weather.eastern(closed)
         expected_event = (
@@ -197,7 +202,7 @@ def select_market(payload, reply):
         secondary = m.get("rules_secondary")
         title = m.get("title")
         if not all(
-            isinstance(x, str) and len(x) <= n
+            isinstance(x, str) and 0 < len(x) <= n
             for x, n in ((primary, 1200), (secondary, 3000), (title, 160))
         ):
             raise ValueError("Missing BTC contract rules.")

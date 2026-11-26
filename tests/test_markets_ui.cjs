@@ -316,7 +316,7 @@ test('Bitcoin defaults to observed Kalshi odds with venue target, independent bi
   assert.match(html,/YES ask<\/span><strong>58¢<\/strong>/);
   assert.match(html,/NO ask<\/span><strong>44¢<\/strong>/);
   assert.match(html,/\+2¢ since prior poll/); assert.match(html,/−2¢ since prior poll/);
-  assert.match(html,/12\.4 at ask/); assert.match(html,/2 book receipts/);
+  assert.match(html,/12\.4 contracts at ask/); assert.match(html,/2 book receipts/);
   assert.match(html,/data-btc-countdown="2026-11-26T15:10:00\.000Z" aria-live="off">10:00/);
   assert.match(html,/15:00:00 UTC/); assert.match(html,/Venue response 14:59:59 UTC/);
   assert.match(html,/Source rule &lt;verified&gt;/);

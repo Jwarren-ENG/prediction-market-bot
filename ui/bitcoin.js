@@ -212,7 +212,7 @@ function oddsSide(side, prices, delta, market) {
     `${delta > 0 ? '+' : '−'}${price(Math.abs(delta))} since prior poll`;
   const size = ask !== null ? positive(market[side+'_ask_size']) : null;
   return `<div class="btc-odds-side"><span>${side.toUpperCase()} ask</span><strong>${price(ask)}</strong>
-    <span class="btc-odds-bid">Bid <b>${price(bid)}</b>${size !== null ? ` · ${count(size)} at ask` : ''}</span>
+    <span class="btc-odds-bid">Bid <b>${price(bid)}</b>${size !== null ? ` · ${count(size)} ${size === 1 ? 'contract' : 'contracts'} at ask` : ''}</span>
     ${movement ? `<small>${esc(movement)}</small>` : ''}</div>`;
 }
 function contractTerms(market) {

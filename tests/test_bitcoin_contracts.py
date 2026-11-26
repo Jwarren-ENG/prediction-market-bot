@@ -214,6 +214,24 @@ class BitcoinContractsTest(unittest.TestCase):
         self.assertIsNone(s["current"]["yes_ask_cents"])
         self.assertEqual(s["current"]["history"][-1]["kind"], "book")
 
+    def test_retains_only_recent_observed_windows_with_bounded_separate_history(self):
+        self.now = OPENED
+        for i in range(6):
+            opened = OPENED + i * btc.WINDOW
+            self.catalog["markets"] = [market(opened)]
+            for _ in range(90):
+                self.assertTrue(self.feed.poll())
+                self.advance(btc.INTERVAL)
+        state = self.feed.state()
+        self.assertIsNone(state["current"])
+        self.assertEqual(len(state["recent"]), 4)
+        for row in state["recent"]:
+            self.assertEqual(len(row["history"]), 90)
+            self.assertIsNone(row["yes_ask_cents"])
+            self.assertTrue(
+                all(row["open_at"] <= h["at"] < row["close_at"] for h in row["history"])
+            )
+
     def test_stale_reply_failed_gap_and_throttle(self):
         self.poll()
         self.advance(21)
