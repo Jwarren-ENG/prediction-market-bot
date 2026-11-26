@@ -49,6 +49,10 @@ def stamp(value):
     return weather.iso(value) if value else None
 
 
+class StaleBook(ValueError):
+    """A reachable venue returned market data too old to use."""
+
+
 def source_time(value, short):
     local = weather.eastern(value)
     zone = "EDT" if local.utcoffset() == timedelta(hours=-4) else "EST"
@@ -69,25 +73,45 @@ def book_url(ticker):
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         fp.close()
-        raise feeds.Unavailable("The Kalshi BTC endpoint redirected.")
+        raise feeds.Unavailable("The public BTC endpoint redirected.")
+
+
+KALSHI_SERIES = feeds.API + "/series/KXBTC15M"
+KALSHI_CHANGES = feeds.API + "/series/fee_changes?series_ticker=KXBTC15M"
+KALSHI_EVENTS = feeds.API + "/events/fee_changes?event_ticker="
+KALSHI_FEES = "https://kalshi.com/docs/kalshi-fee-schedule.pdf"
+EVENT = re.compile(r"KXBTC15M-[0-9]{2}[A-Z]{3}[0-9]{6}")
+
+
+def kalshi_url(url):
+    if url in (CATALOG, KALSHI_SERIES, KALSHI_CHANGES):
+        return True
+    if url.startswith(KALSHI_EVENTS):
+        return bool(EVENT.fullmatch(url.removeprefix(KALSHI_EVENTS)))
+    for prefix in (feeds.API + "/markets/", feeds.API + "/historical/markets/"):
+        if url.startswith(prefix):
+            suffix = url.removeprefix(prefix)
+            if prefix == feeds.API + "/markets/":
+                suffix = suffix.removesuffix(f"/orderbook?depth={DEPTH}")
+            return bool(TICKER.fullmatch(suffix))
+    return False
 
 
 def download(url, *, max_bytes, permission_guard):
-    # Only a scoped catalog and a book on a validated ticker can be requested.
-    prefix = feeds.API + "/markets/"
-    suffix = f"/orderbook?depth={DEPTH}"
-    if url != CATALOG and not (
-        url.startswith(prefix)
-        and url.endswith(suffix)
-        and TICKER.fullmatch(url[len(prefix) : -len(suffix)])
-    ):
-        raise ValueError("Unexpected Kalshi BTC endpoint.")
+    return official_get(
+        url, kalshi_url, max_bytes=max_bytes, permission_guard=permission_guard
+    )
+
+
+def official_get(url, allowed, *, max_bytes, permission_guard):
+    if not allowed(url):
+        raise ValueError("Unexpected BTC venue endpoint.")
     ctx = ssl.create_default_context()
     if not ctx.get_ca_certs() and Path("/etc/ssl/cert.pem").is_file():
         ctx.load_verify_locations("/etc/ssl/cert.pem")
     client = build_opener(HTTPSHandler(context=ctx), NoRedirects())
     req = Request(
-        feeds.checked_url(url),
+        url,
         headers={
             "User-Agent": "PMB/0.1 (personal BTC market monitor)",
             "Accept": "application/json",
@@ -102,7 +126,7 @@ def download(url, *, max_bytes, permission_guard):
             when = feeds.clock()
             permission_guard()
             if len(body) > max_bytes:
-                raise feeds.Unavailable("Kalshi BTC response exceeds its size limit.")
+                raise feeds.Unavailable("Public BTC response exceeds its size limit.")
             return feeds.Reply(
                 body,
                 when,
@@ -124,10 +148,10 @@ def download(url, *, max_bytes, permission_guard):
         finally:
             exc.close()
         raise feeds.Unavailable(
-            f"Kalshi HTTP {exc.code}", exc.code, max(1, retry)
+            f"Market data HTTP {exc.code}", exc.code, max(1, retry)
         ) from None
     except (HTTPException, URLError, OSError, ValueError) as exc:
-        raise feeds.Unavailable("Kalshi BTC transport unavailable.") from exc
+        raise feeds.Unavailable("Public BTC transport unavailable.") from exc
 
 
 def target(market):
@@ -225,6 +249,15 @@ def select_market(payload, reply):
             closed,
             {
                 "id": ticker,
+                "venue": "kalshi",
+                "interval_minutes": 15,
+                "source_time_kind": "venue_http_date",
+                "rules_verified": True,
+                "fee_rate": None,
+                "fee_source": KALSHI_FEES,
+                "fee_verified_at": None,
+                "fee_valid_until": None,
+                "fee_waiver_expiration_time": m.get("fee_waiver_expiration_time"),
                 "event_id": match[1],
                 "title": title,
                 "open_at": stamp(opened),
@@ -310,6 +343,8 @@ class Contract:
     meta: dict
     seen: datetime | None = None
     http: datetime | None = None
+    source_at: datetime | None = None
+    fee_snapshot: dict = field(default_factory=dict)
     depth: dict = field(default_factory=empty_depth)
     history: deque = field(default_factory=lambda: deque(maxlen=MAX_SAMPLES))
 
@@ -321,6 +356,7 @@ class Contract:
             {
                 "at": at,
                 "http_date": stamp(http),
+                "source_at": stamp(self.source_at) if http else None,
                 "kind": "book" if http else "gap",
                 **best(depth, False),
             }
@@ -328,6 +364,9 @@ class Contract:
 
     def view(self, now, active):
         cutoff = stamp(now)
+        terms = {**self.meta, **self.fee_snapshot}
+        if terms.get("fee_valid_until") and terms["fee_valid_until"] <= cutoff:
+            terms["fee_rate"] = None
         depth = (
             {
                 side: {
@@ -340,11 +379,18 @@ class Contract:
             else empty_depth()
         )
         return {
-            **self.meta,
+            **terms,
+            "source_at": (
+                stamp(self.source_at)
+                if self.source_at and self.source_at <= now + timedelta(seconds=3)
+                else None
+            ),
             "observed_at": stamp(self.seen) if self.seen and self.seen <= now else None,
-            "http_date": stamp(self.http)
-            if self.http and self.http <= now + timedelta(seconds=3)
-            else None,
+            "http_date": (
+                stamp(self.http)
+                if self.http and self.http <= now + timedelta(seconds=3)
+                else None
+            ),
             **best(depth, True),
             "depth": depth,
             "history": [
@@ -356,6 +402,20 @@ class Contract:
 class BitcoinContracts:
     """All venue state is in memory. Access returns (enabled|disabled|offline, generation)."""
 
+    venue_name = "Kalshi"
+    catalog_url = CATALOG
+    rules_url = RULES
+    max_http_age = 5
+    catalog_max_http_age = None
+    freshness_error = ValueError
+    window_minutes = 15
+    separate_fee_reads = True
+    select_market = staticmethod(select_market)
+
+    @staticmethod
+    def read_depth(candidate, reply):
+        return parse_book(reply.json()), reply.origin_date
+
     def __init__(self, access, lock, *, fetch=None, now=None, monotonic=None):
         self._access = access
         self._lock = lock
@@ -363,6 +423,9 @@ class BitcoinContracts:
         self._now = now or feeds.clock
         self._mono = monotonic or time.monotonic
         self.wake = threading.Event()
+        self._fee_wake = threading.Event()
+        self._fee_retry = 0.0
+        self._fee_busy = False
         self._scope = None
         self._busy = False
         self._retry = self._next = 0.0
@@ -375,7 +438,7 @@ class BitcoinContracts:
         self._checked = self._success = self._http = None
         self._failures = 0
         self._status = "waiting"
-        self._message = "Waiting for a current Kalshi BTC contract."
+        self._message = f"Waiting for a current {self.venue_name} BTC contract."
 
     def _synchronize(self):
         scope = self._access()
@@ -388,6 +451,7 @@ class BitcoinContracts:
         with self._lock:
             self._synchronize()
             self.wake.set()
+            self._fee_wake.set()
 
     def _gate(self, expected):
         with self._lock:
@@ -395,9 +459,10 @@ class BitcoinContracts:
 
     def _check_scope(self, expected):
         if self._synchronize() != expected:
-            raise feeds.PermissionRevoked("Public Kalshi permission changed.")
+            raise feeds.PermissionRevoked("Public BTC venue permission changed.")
 
-    def _read(self, url, scope, started, limit):
+    def _read(self, url, scope, started, limit, max_age=None):
+        max_age = self.max_http_age if max_age is None else max_age
         self._gate(scope)
         reply = self._fetch(
             url, max_bytes=limit, permission_guard=lambda: self._gate(scope)
@@ -406,21 +471,23 @@ class BitcoinContracts:
         if (
             reply.status != 200
             or not reply.origin_date
-            or not 0 <= reply.age <= 5
-            or not -3 <= (reply.seen - reply.origin_date).total_seconds() <= 5
+            or not 0 <= reply.age <= max_age
+            or not -3 <= (reply.seen - reply.origin_date).total_seconds() <= max_age
             or reply.seen < started
             or not 0 <= (self._now() - reply.seen).total_seconds() <= INTERVAL
         ):
-            raise ValueError("Stale or undated Kalshi BTC response.")
+            raise self.freshness_error("Stale or undated BTC market response.")
         return reply
 
     def _prune(self, now):
-        # At most four actually observed earlier quarter-hours plus the current market.
+        # Bound each product to four observed earlier windows plus its current market.
         cutoff = stamp(now)
         self._contracts = {
             key: row
             for key, row in self._contracts.items()
-            if row.opened <= now < row.closed + RECENT
+            if row.opened
+            <= now
+            < row.closed + timedelta(minutes=4 * self.window_minutes)
             and row.meta["catalog_observed_at"] <= cutoff
         }
         if self._current and (
@@ -436,7 +503,7 @@ class BitcoinContracts:
         if candidate is None or not candidate.opened <= self._now() < candidate.closed:
             self._current = None
             self._status = "empty"
-            self._message = "Kalshi returned no active 15-minute BTC window."
+            self._message = f"{self.venue_name} returned no active {self.window_minutes}-minute BTC window."
             self._success, self._http = reply.seen, reply.origin_date
             self._failures = 0
             return False
@@ -450,6 +517,10 @@ class BitcoinContracts:
                 or old.meta["target_usd"] == candidate.meta["target_usd"]
             )
         ):
+            if old.meta.get("fee_waiver_expiration_time") != candidate.meta.get(
+                "fee_waiver_expiration_time"
+            ):
+                old.fee_snapshot.clear()
             old.meta = candidate.meta
         else:
             self._contracts[key] = candidate
@@ -457,17 +528,20 @@ class BitcoinContracts:
             self._status = "waiting"
             self._message = "Waiting for the active contract's order book."
         self._current = key
+        self._fee_wake.set()
         return True
 
     def _capture(self, scope, started):
-        catalog = self._read(CATALOG, scope, started, 500_000)
-        candidate = select_market(catalog.json(), catalog)
+        catalog = self._read(
+            self.catalog_url, scope, started, 500_000, self.catalog_max_http_age
+        )
+        candidate = self.select_market(catalog.json(), catalog)
         with self._lock:
             self._check_scope(scope)
             if not self._apply_catalog(candidate, catalog):
                 return
-        book = self._read(candidate.meta["book_url"], scope, catalog.seen, 40_000)
-        depth = parse_book(book.json())
+        book = self._read(candidate.meta["book_url"], scope, catalog.seen, 150_000)
+        depth, economic = self.read_depth(candidate, book)
         with self._lock:
             self._check_scope(scope)
             self._prune(self._now())
@@ -475,19 +549,32 @@ class BitcoinContracts:
                 self._current != candidate.meta["id"]
                 or not candidate.opened <= book.seen < candidate.closed
                 or not candidate.opened <= book.origin_date < candidate.closed
+                or not candidate.opened <= economic < candidate.closed
+                or not -3 <= (book.seen - economic).total_seconds() <= STALE
             ):
-                raise ValueError("The 15-minute BTC window ended during this read.")
+                raise ValueError("The BTC contract window ended during this read.")
             row = self._contracts[self._current]
-            if row.seen and book.seen <= row.seen:
+            if (row.seen and book.seen <= row.seen) or (
+                row.source_at and economic < row.source_at
+            ):
                 raise ValueError("BTC book receipt clock did not advance.")
+            if (
+                row.meta["source_time_kind"] == "venue_book_transact_time"
+                and row.source_at == economic
+                and row.depth != depth
+            ):
+                raise ValueError("Conflicting depth at the same venue book timestamp.")
             row.seen, row.http, row.depth = book.seen, book.origin_date, depth
+            row.source_at = economic
             row.point(book.seen, book.origin_date, depth)
             self._success, self._http = book.seen, book.origin_date
             self._retry = 0.0
             self._failures = 0
             if row.meta["target_usd"] is None:
                 self._status = "partial"
-                self._message = "Kalshi has not published the opening BTC target."
+                self._message = (
+                    f"{self.venue_name} has not published the opening BTC target."
+                )
             elif not all(depth[side]["bids"] for side in BOOK_SIDES):
                 self._status = "partial"
                 self._message = (
@@ -503,11 +590,25 @@ class BitcoinContracts:
         now = self._now()
         self._prune(now)
         self._failures += 1
-        if isinstance(error, feeds.Unavailable) and error.code == 429:
+        if isinstance(error, StaleBook):
+            self._failures = 0
+            delay = INTERVAL
+            self._status = "stale"
+            self._message = f"{self.venue_name} returned a stale BTC snapshot. Waiting for fresh quotes."
+        elif isinstance(error, feeds.Unavailable) and error.code == 404:
+            self._failures = 0
+            delay = INTERVAL
+            self._status = "waiting"
+            self._message = f"{self.venue_name} has not published the market or book for this window."
+        elif isinstance(error, feeds.Unavailable) and error.code in (401, 403, 451):
+            delay = 300
+            self._status = "restricted"
+            self._message = f"{self.venue_name} denied public market data access (HTTP {error.code})."
+        elif isinstance(error, feeds.Unavailable) and error.code == 429:
             delay = max(INTERVAL, min(366 * 86400, error.retry or 60))
             self._throttled_until = self._mono() + delay
             self._status = "rate_limited"
-            self._message = f"Kalshi rate limited the BTC monitor. Retry in at least {delay} seconds."
+            self._message = f"{self.venue_name} rate limited the BTC monitor. Retry in at least {delay} seconds."
         else:
             delay = min(300, INTERVAL * 2 ** min(5, self._failures - 1))
             self._status = "error"
@@ -538,7 +639,88 @@ class BitcoinContracts:
                 self._busy = False
         return True
 
+    def poll_fees(self):
+        """Verify the series schedule and event overrides off the fast book sampler."""
+        from .btc_venues import kalshi_fee_snapshot
+
+        with self._lock:
+            scope = self._synchronize()
+            now = self._now()
+            self._prune(now)
+            row = self._contracts.get(self._current)
+            if (
+                scope[0] != "enabled"
+                or not row
+                or self._fee_busy
+                or self._mono() < self._fee_retry
+                or not self.separate_fee_reads
+                or (
+                    row.fee_snapshot
+                    and row.fee_snapshot["fee_valid_until"] > stamp(now)
+                )
+            ):
+                return False
+            self._fee_busy = True
+            self._fee_retry = self._mono() + 30
+            market_id = self._current
+            event = row.meta["event_id"]
+            close = row.closed
+            waiver = row.meta.get("fee_waiver_expiration_time")
+        try:
+
+            def read(url):
+                return self._read(url, scope, now, 100_000)
+
+            fees = kalshi_fee_snapshot(read, event, close, waiver)
+            with self._lock:
+                self._check_scope(scope)
+                if (
+                    fees
+                    and self._current == market_id
+                    and self._now() < close
+                    and self._contracts[market_id] is row
+                    and row.meta.get("fee_waiver_expiration_time") == waiver
+                ):
+                    self._contracts[market_id].fee_snapshot = fees
+        except feeds.PermissionRevoked:
+            pass
+        except (feeds.Unavailable, *feeds.SAFE_ERRORS) as exc:
+            if isinstance(exc, feeds.Unavailable) and exc.code == 429:
+                with self._lock:
+                    self._fee_retry = max(
+                        self._fee_retry,
+                        self._mono() + min(366 * 86400, max(30, exc.retry or 60)),
+                    )
+        finally:
+            with self._lock:
+                self._fee_busy = False
+        return True
+
+    def _fee_loop(self, stop):
+        while not stop.is_set():
+            self._fee_wake.clear()
+            self.poll_fees()
+            if not stop.is_set():
+                self._fee_wake.wait(30)
+
     def run(self, stop_event):
+        reader = None
+        if self.separate_fee_reads:
+            reader = threading.Thread(
+                target=self._fee_loop,
+                args=(stop_event,),
+                name="kalshi-btc-fees",
+                daemon=True,
+            )
+            reader.start()
+        try:
+            self._quote_loop(stop_event)
+        finally:
+            self._fee_wake.set()
+            if reader:
+                reader.join(timeout=1)
+
+    def _quote_loop(self, stop_event):
         while not stop_event.is_set():
             self.wake.clear()
             self.poll()
@@ -558,22 +740,32 @@ class BitcoinContracts:
             if mode == "offline":
                 status, message = "offline", "The worker is offline."
             elif mode != "enabled":
-                status, message = "disabled", "Public Kalshi market reads are off."
+                status, message = (
+                    "disabled",
+                    f"Public {self.venue_name} market reads are off.",
+                )
             elif status == "waiting" and self._mono() < self._throttled_until:
                 status, message = (
                     "rate_limited",
-                    "Waiting for the previous Kalshi rate limit to expire.",
+                    f"Waiting for the previous {self.venue_name} rate limit to expire.",
                 )
             elif (
                 status in ("live", "partial", "empty")
                 and self._success
-                and not (0 <= (now - self._success).total_seconds() <= STALE)
+                and (
+                    not 0 <= (now - self._success).total_seconds() <= STALE
+                    or (
+                        current
+                        and current.source_at
+                        and (now - current.source_at).total_seconds() > STALE
+                    )
+                )
             ):
                 status, message = "stale", "The last successful BTC check is stale."
             elif not current and status in ("live", "partial"):
                 status, message = (
                     "waiting",
-                    "Waiting for the next 15-minute BTC contract.",
+                    f"Waiting for the next {self.window_minutes}-minute BTC contract.",
                 )
             recent = sorted(
                 (row for row in self._contracts.values() if row.closed <= now),
@@ -586,19 +778,28 @@ class BitcoinContracts:
                 "enabled": mode == "enabled",
                 "interval_seconds": INTERVAL,
                 "stale_after_seconds": STALE,
-                "last_checked_at": stamp(self._checked)
-                if self._checked and self._checked <= now
-                else None,
-                "last_success_at": stamp(self._success)
-                if self._success and self._success <= now
-                else None,
-                "http_date": stamp(self._http)
-                if self._http and self._http <= now + timedelta(seconds=3)
-                else None,
-                "source_url": CATALOG,
-                "rules_url": RULES,
-                "current": current.view(now, status in ("partial", "live"))
-                if current
-                else None,
+                "last_checked_at": (
+                    stamp(self._checked)
+                    if self._checked and self._checked <= now
+                    else None
+                ),
+                "last_success_at": (
+                    stamp(self._success)
+                    if self._success and self._success <= now
+                    else None
+                ),
+                "http_date": (
+                    stamp(self._http)
+                    if self._http and self._http <= now + timedelta(seconds=3)
+                    else None
+                ),
+                "source_url": self.catalog_url,
+                "rules_url": self.rules_url,
+                "interval_minutes": self.window_minutes,
+                "current": (
+                    current.view(now, status in ("partial", "live"))
+                    if current
+                    else None
+                ),
                 "recent": [row.view(now, False) for row in recent],
             }

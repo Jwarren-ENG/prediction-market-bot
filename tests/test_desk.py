@@ -83,17 +83,42 @@ class DesktopServiceTest(unittest.TestCase):
             status, raw = self.api("/api/bitcoin")
             self.assertEqual(status, 200)
             bitcoin = json.loads(raw)
-            self.assertEqual(set(bitcoin), {"version", "health", "bitcoin", "bitcoin_contracts"})
+            self.assertEqual(set(bitcoin), {"version", "health", "bitcoin", "bitcoin_contracts",
+                                           "polymarket_contracts", "polymarket_hourly_contracts", "bitcoin_brokers"})
+            trials = bitcoin["bitcoin_brokers"]
+            self.assertEqual(set(trials), {"kalshi", "polymarket_us", "polymarket_us_hourly"})
+            for key, account in trials.items():
+                self.assertEqual(account["venue"], key)
+                self.assertEqual(account["portfolio"]["cash_cents"], 1000000)
             self.assertIn(bitcoin["bitcoin_contracts"]["status"], ("disabled", "offline"))
             with patch.object(self.desk.bitcoin, "state", side_effect=AssertionError("Spot desk accessed")):
                 status, raw = self.api("/api/comparison")
                 self.assertEqual(status, 200)
-                self.assertEqual(set(json.loads(raw)), {"version", "health", "comparison"})
+                self.assertEqual(set(json.loads(raw)), {"version", "health", "comparison", "bitcoin_brokers"})
                 status, raw = self.api("/api/status")
                 self.assertEqual(status, 200)
                 self.assertEqual(set(json.loads(raw)), {"version", "health"})
         for resource in ("bitcoin", "comparison", "status"):
             self.assertEqual(self.api("/api/" + resource, private=False)[0], 401)
+
+    def test_contract_controls_are_private_scoped_and_revoke_both_us_windows(self):
+        def post(name, value, private=True):
+            return self.api("/api/action", body={"action":name, "value":value}, private=private)[0]
+
+        book = self.desk.bitcoin_trials
+        kalshi_before = book.accounts["kalshi"].state()["auto_enabled"]
+        with patch.object(self.desk, "online", True):
+            self.assertEqual(post("btc-poly-feed", True, False), 401)
+            self.assertEqual(post("btc-poly-feed", True), 200)
+            for key in ("polymarket_us", "polymarket_us_hourly"):
+                self.assertEqual(post("btc-contract-auto", {"venue":key, "enabled":True}), 200)
+                self.assertTrue(book.accounts[key].state()["auto_enabled"])
+            self.assertEqual(post("btc-contract-auto", {"venue":"unknown", "enabled":True}), 400)
+            self.assertEqual(post("btc-poly-feed", False), 200)
+            for key in ("polymarket_us", "polymarket_us_hourly"):
+                self.assertFalse(book.accounts[key].state()["auto_enabled"])
+                self.assertEqual(post("btc-contract-auto", {"venue":key, "enabled":True}), 400)
+        self.assertEqual(book.accounts["kalshi"].state()["auto_enabled"], kalshi_before)
 
     def test_origin_content_type_and_host_validation(self):
         host, port = self.server.server_address

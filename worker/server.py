@@ -20,7 +20,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from . import monitoring
 from .bitcoin import BitcoinPaper, quote_fresh
-from .bitcoin_contracts import BitcoinContracts
+from .btc_trials import BitcoinTrials
 from .feeds import collect
 from .ledger import Ledger
 from .notifications import Notifications
@@ -32,7 +32,7 @@ from .weather import instant
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47823
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 LOG = logging.getLogger("pmb")
 
 
@@ -61,7 +61,8 @@ class Desk:
         self.online = online
         self.quotes = QuoteTape(self._quote_access, self.transition)
         self.bitcoin = BitcoinPaper(directory, online=online)
-        self.bitcoin_contracts = BitcoinContracts(self._quote_access, self.transition)
+        self.bitcoin_trials = BitcoinTrials(directory, self._quote_access, self._poly_access, self.transition)
+        self.bitcoin_contracts = self.bitcoin_trials.sources["kalshi"]
         self.next_pair = 0.0
         self.interval = interval
         self.started = utc()
@@ -87,11 +88,17 @@ class Desk:
         return self.store.get("mode", "replay")
 
     def _quote_access(self):
+        return self._access("allow_market", "permission_generation")
+
+    def _poly_access(self):
+        return self._access("allow_polymarket_us", "polymarket_generation")
+
+    def _access(self, setting, generation):
         if not self.online or self.stop.is_set():
             return "offline", None
-        if self.store.get("allow_market", False) is not True:
+        if self.store.get(setting, False) is not True:
             return "disabled", None
-        return "enabled", self.store.get("permission_generation", 0)
+        return "enabled", self.store.get(generation, 0)
 
     def paper_automation(self):
         control = self.ledgers["forward"].entry_control()
@@ -123,10 +130,12 @@ class Desk:
         snapshot = {"version": VERSION, "health": {"online": self.online, "heartbeat": self.heartbeat}}
         if desk == "bitcoin":
             snapshot["bitcoin"] = self.bitcoin.state()
-            snapshot["bitcoin_contracts"] = self.bitcoin_contracts.state()
+            snapshot.update(self.bitcoin_trials.snapshot())
         elif desk == "comparison":
             with self.store.connection() as db:
                 snapshot["comparison"] = monitoring.comparison(db)
+            snapshot["comparison"]["bitcoin_managed"] = self.bitcoin.managed()
+            snapshot.update(self.bitcoin_trials.snapshot(comparison=True))
         return snapshot
 
     def state(self, *, activity_hours=None, bitcoin=False):
@@ -238,7 +247,7 @@ class Desk:
             with self.store.connection() as db:
                 if not db.execute("SELECT 1 FROM paired_equity LIMIT 1").fetchone():
                     start = instant(btc["started_at"])
-                    if 0 <= (now-start).total_seconds() <= 60:
+                    if not btc.get("manual_trades") and 0 <= (now-start).total_seconds() <= 60:
                         opening = self.ledgers["forward"].portfolio_mark(start, require_known_at=True)
                         if monitoring.comparable_weather(opening):
                             monitoring.record_pair(db, btc["started_at"], opening["equity_cents"],
@@ -449,10 +458,11 @@ class Desk:
     def schedule(self):
         collectors = []
         if self.online:
-            for name, collector in (("public-quote-sampler", self.quotes),
-                                    ("bitcoin-paper", self.bitcoin),
-                                    ("bitcoin-contract-quotes", self.bitcoin_contracts)):
-                thread = threading.Thread(target=collector.run, args=(self.stop,), name=name, daemon=True)
+            jobs = {"public-quote-sampler": self.quotes.run, "bitcoin-paper": self.bitcoin.run,
+                    "bitcoin-trials": self.bitcoin_trials.run, "bitcoin-settlements": self.bitcoin_trials.settle}
+            jobs.update({key + "-contract-quotes": source.run for key, source in self.bitcoin_trials.sources.items()})
+            for name, fn in jobs.items():
+                thread = threading.Thread(target=fn, args=(self.stop,), name=name, daemon=True)
                 thread.start()
                 collectors.append(thread)
         try:
@@ -474,14 +484,29 @@ class Desk:
                 self.wake.clear()
         finally:
             self.quotes.wake.set()
-            self.bitcoin_contracts.wake.set()
+            for source in self.bitcoin_trials.sources.values():
+                source.wake.set()
             for thread in collectors:
                 thread.join(timeout=1)
 
     def action(self, action, value):
         with self.transition:
             mode = self.mode()
-            if action in ("btc-feed", "btc-auto") and type(value) is bool:
+            if action in ("btc-contract-order", "btc-contract-auto", "btc-contract-limits"):
+                return self.bitcoin_trials.action(action, value)
+            if action == "btc-spot-order":
+                receipt = self.bitcoin.manual_order(value)
+                self.next_pair = 0.0
+                self.wake.set()
+                return {"ok": True, "receipt": receipt}
+            if action == "btc-poly-feed" and type(value) is bool:
+                if value and not self.online:
+                    raise ValueError("An online worker is required for Polymarket US data.")
+                if self.store.get("allow_polymarket_us", False) != value:
+                    self.store.put_many({"allow_polymarket_us": value,
+                        "polymarket_generation": self.store.get("polymarket_generation", 0) + 1})
+                    self.bitcoin_trials.source_permission_changed(("polymarket_us", "polymarket_us_hourly"))
+            elif action in ("btc-feed", "btc-auto") and type(value) is bool:
                 if value and not self.online:
                     raise ValueError("An online worker is required for the Bitcoin paper trial.")
                 if action == "btc-feed":
@@ -522,7 +547,7 @@ class Desk:
                         }
                     )
                     self.quotes.permission_changed()
-                    self.bitcoin_contracts.permission_changed()
+                    self.bitcoin_trials.source_permission_changed(("kalshi",))
                     self.scan_revision += 1
                     self.next_scan = 0.0
                     self.wake.set()

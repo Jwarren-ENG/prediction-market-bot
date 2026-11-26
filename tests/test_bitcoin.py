@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
+from concurrent.futures import ThreadPoolExecutor
 
 from worker import bitcoin as b
 
@@ -98,6 +100,107 @@ class BitcoinPaperTests(TestCase):
     def activate(self):
         self.paper.configure(True)
         self.paper.set_auto(True)
+
+    def test_manual_partial_sales_conserve_basis_pause_auto_and_retry_after_restart(
+        self,
+    ):
+        self.paper.configure(True)
+        self.paper.poll_once()
+        self.paper.set_auto(True)
+        order = dict(
+            client_id=str(uuid4()), side="buy", budget_cents=10000, limit_usd="10100"
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(self.paper.manual_order, [order, order]))
+        buy = receipts[0]
+        self.assertEqual(receipts[1], buy)
+        self.assertEqual(self.paper.manual_order(dict(order, limit_usd="10100.0")), buy)
+        with self.assertRaisesRegex(ValueError, "different terms"):
+            self.paper.manual_order(dict(order, budget_cents=19000))
+        initial = self.paper.state()
+        self.assertTrue(self.paper.managed())
+        self.assertFalse(initial["auto_enabled"])
+        self.assertEqual(initial["manual_trades"], 1)
+        self.assertEqual(initial["benchmark"]["filled_orders"], 0)
+        self.assertEqual(
+            initial["portfolio"]["cash_cents"]
+            + initial["portfolio"]["open_cost_cents"],
+            b.START_CENTS,
+        )
+        qty = Decimal(buy["btc"])
+        sale = dict(
+            client_id=str(uuid4()), side="sell", quantity_btc="0.001", limit_usd="9900"
+        )
+        partial = self.paper.manual_order(sale)
+        after = self.paper.state()["portfolio"]
+        self.assertEqual(Decimal(after["btc"]), qty - Decimal("0.001"))
+        self.assertGreater(after["open_cost_cents"], 0)
+        basis = initial["portfolio"]["open_cost_cents"] - after["open_cost_cents"]
+        self.assertEqual(after["realized_cents"], partial["cash_amount_cents"] - basis)
+        self.paper.manual_order(dict(sale, client_id=str(uuid4()), quantity_btc="all"))
+        closed = self.paper.state()["portfolio"]
+        self.assertEqual(closed["open_cost_cents"], 0)
+        self.assertEqual(closed["cash_cents"] - b.START_CENTS, closed["realized_cents"])
+        self.src.step(500)
+        self.assertEqual(
+            b.BitcoinPaper(self.root, online=False).manual_order(order), buy
+        )
+
+    def test_manual_stale_limits_depth_reuse_and_no_automatic_retry_of_rejection(self):
+        self.paper.configure(True)
+        self.src.ask_size = "0.00010000"
+        self.paper.poll_once()
+        order = dict(
+            client_id=str(uuid4()), side="buy", budget_cents=100, limit_usd="9000"
+        )
+        with self.assertRaisesRegex(ValueError, "outside your limit"):
+            self.paper.manual_order(order)
+        ok = self.paper.manual_order(
+            dict(order, limit_usd="11000", client_id=str(uuid4()))
+        )
+        self.assertGreater(Decimal(ok["btc"]), 0)
+        with self.assertRaisesRegex(ValueError, "depth"):
+            self.paper.manual_order(
+                dict(order, limit_usd="11000", client_id=str(uuid4()))
+            )
+        self.src.step()
+        with self.assertRaisesRegex(ValueError, "fresh"):
+            self.paper.manual_order(dict(order, client_id=str(uuid4())))
+        self.src.ask, self.src.bid = "8900", "8880"
+        self.paper.poll_once()
+        with self.assertRaisesRegex(ValueError, "outside your limit"):
+            self.paper.manual_order(order)
+        self.paper.configure(False)
+        self.paper.configure(True)
+        with self.assertRaisesRegex(ValueError, "fresh"):
+            self.paper.manual_order(dict(order, client_id=str(uuid4())))
+        self.assertEqual(self.paper.state()["manual_trades"], 1)
+
+    def test_manual_spot_exposure_and_oversell(self):
+        self.paper.configure(True)
+        self.paper.poll_once()
+        order = dict(
+            client_id=str(uuid4()), side="buy", budget_cents=49000, limit_usd="11000"
+        )
+        self.paper.manual_order(order)
+        with self.assertRaisesRegex(ValueError, "open-cost"):
+            self.paper.manual_order(
+                dict(order, client_id=str(uuid4()), budget_cents=2000)
+            )
+        with self.assertRaisesRegex(ValueError, "exceeds"):
+            self.paper.manual_order(
+                dict(
+                    client_id=str(uuid4()),
+                    side="sell",
+                    quantity_btc="2",
+                    limit_usd="5000",
+                )
+            )
+        for invalid in (True, "-1", "0.000000001"):
+            with self.assertRaises(ValueError):
+                self.paper.manual_order(
+                    dict(order, client_id=str(uuid4()), limit_usd=invalid)
+                )
 
     def test_fixed_rule_uses_eight_contiguous_completed_utc_days(self):
         bars = self.src.daily()
