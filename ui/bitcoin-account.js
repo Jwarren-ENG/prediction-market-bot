@@ -2,6 +2,7 @@ import {arr, button, count, dash, displayTimeZone, esc, field, headline, human, 
 import {bitcoinAccount, bitcoinSignal} from './bitcoin.js';
 import {autoSwitch, brokerFor, contractAuto, feedFor, riskForm, venues} from './bitcoin-trading.js';
 import {trialPerformance} from './bitcoin-performance.js';
+import {portfolioChart} from './portfolio-chart.js';
 
 const products=Object.keys(venues);
 const panel=(title,body,control='')=>`<section class="panel"><div class="panel-head"><h2>${esc(title)}</h2>${control}</div><div class="panel-body">${body}</div></section>`;
@@ -40,14 +41,14 @@ function recordedResearch(state,venue) {
     <dl class="field-list">${field('All completed traded windows',count(performance.closed_windows))}${field('Their net after fees',money(performance.net_cents,true))}${field('Worst recorded drawdown',money(performance.max_drawdown_cents))}</dl>
     ${m?.rules_url?`<div class="btc-source-links">${sourceLink('Venue contract rules',m.rules_url)}</div>`:''}`);
 }
-function portfolio(state) {
+function portfolio(state,ui) {
   const balances=products.map(v=>{
     const p=brokerFor(state,v)?.portfolio||{};
     return cells(venues[v].label,[money(p.cash_cents),money(p.equity_cents),money(p.open_cost_cents),money(p.realized_cents,true),money(p.net_gain_cents,true),count(p.filled_orders)]);
   });
   const positions=products.flatMap(v=>arr(brokerFor(state,v)?.positions).filter(p=>Number(p.qty)>0).map(p=>
     cells(venues[v].label,[p.title||p.market_id,String(p.side).toUpperCase(),count(p.qty),money(p.cost_cents),money(p.mark_value_cents),human(p.mark_status)||dash,stamp(p.close_at)])));
-  return `<div class="btc-workspace">${panel('Contract accounts',table(['Paper account','Cash','Marked equity','Open cost','Realized','Net gain / loss','Fills'],balances,'Independent Bitcoin contract accounts')+note('Each venue and interval uses its own ledger. A missing mark leaves equity and net gain unavailable.'))}
+  return `<div class="btc-workspace">${portfolioChart(state,ui,'bitcoin')}${panel('Contract accounts',table(['Paper account','Cash','Marked equity','Open cost','Realized','Net gain / loss','Fills'],balances,'Independent Bitcoin contract accounts')+note('Each venue and interval uses its own ledger. A missing mark leaves equity and net gain unavailable.'))}
     ${panel('Open contract positions',positions.length ? table(['Account','Contract','Outcome','Held','Cost','Marked value','Mark status','Close'],positions,'Open Bitcoin contract positions') :
       note('There are no open Bitcoin contract positions.'))}${trialPerformance(state)}${bitcoinAccount(state.bitcoin||{})}</div>`;
 }
@@ -103,7 +104,7 @@ export function bitcoinAccountView(state,ui) {
   const view=ui.btcView;
   let body;
   if (view==='Research') body=`<div class="btc-worker-grid">${products.map(v=>recordedResearch(state,v)).join('')}${bitcoinSignal(state.bitcoin||{})}</div><div class="btc-source-links">${sourceLink('Bot performance research','https://github.com/Jwarren-ENG/prediction-market-bot/blob/main/docs/BITCOIN_BOT_EVIDENCE.md')}</div>`;
-  else if(view==='Portfolio') body=portfolio(state);
+  else if(view==='Portfolio') body=portfolio(state,ui);
   else if(view==='Activity') body=activity(state,ui);
   else body=worker(state,ui);
   return `${headline('Bitcoin '+view.toLowerCase(),{Research:'Contract signals and source evidence',Portfolio:'Independent paper accounts and positions',Activity:'Paper fills, decisions and settlement receipts',Worker:'Bitcoin source permissions, automation and risk limits'}[view]||'Paper settings',view==='Worker'?'':tab('Markets'))}${body}`;

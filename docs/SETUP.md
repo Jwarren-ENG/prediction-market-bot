@@ -17,7 +17,7 @@ Prediction Market Bot (PMB) runs a private worker for Central Park weather, Bitc
 3. Open the app. The distributed Mac build carries an ad hoc signature and lacks Apple Developer ID notarization. macOS may ask you to review it. Confirm the download source and use the per-app approval procedure appropriate for your system or choose the source installation. [Apple’s guide to downloaded apps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
 4. A clean workspace opens in **Research** with the synthetic replay already populated. Open **Worker** and find **Worker health** to see the version, heartbeat and operating mode. Window startup can take a few seconds.
 
-You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it. For example, to calculate the digest for the version 0.3.0 archive in Downloads, run `shasum -a 256 "$HOME/Downloads/PMB-0.3.0-macOS-Universal.zip"`.
+You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it. For example, to calculate the digest for the version 0.4.0 archive in Downloads, run `shasum -a 256 "$HOME/Downloads/PMB-0.4.0-macOS-Universal.zip"`.
 
 ~~~sh
 app="$HOME/Applications/Prediction Market Bot.app"
@@ -28,7 +28,7 @@ worker="$app/Contents/MacOS/pmb-worker"
 
 ## Install on Windows
 
-1. Download the **Windows x64 Setup.exe** asset from the same GitHub release. For version 0.3.0, its name is `PMB-0.3.0-Windows-x64-Setup.exe`. If checksums accompany the download, use PowerShell’s `Get-FileHash -Algorithm SHA256` with the installer path and compare the result.
+1. Download the **Windows x64 Setup.exe** asset from the same GitHub release. For version 0.4.0, its name is `PMB-0.4.0-Windows-x64-Setup.exe`. If checksums accompany the download, use PowerShell’s `Get-FileHash -Algorithm SHA256` with the installer path and compare the result.
 2. Run the installer under the Windows account that will own the practice desk. Review its bundled component terms on the agreement screen. By default it installs under `%LOCALAPPDATA%\Programs\Prediction Market Bot`. The PMB installer is unsigned. Review your organization’s software policy if Windows asks about the publisher.
 3. The normal installer checks for Microsoft Edge WebView2. If the runtime is missing, the included Microsoft bootstrapper uses the network to install it. On an offline or managed PC, an administrator can provision Microsoft’s Evergreen Runtime before installation. [Microsoft WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
 4. Open **Start → Prediction Market Bot → Prediction Market Bot**. Find **Research** and **Worker**. Python is included in the package. If the native window cannot open, you can still check the installed worker using PowerShell.
@@ -73,10 +73,10 @@ For the browser interface, run `& $python -I -B $entry serve` in one private Pow
 
 Use Python 3.12 or later for these instructions. The worker and browser interface use Python’s standard library and the assets in `ui/`. Node.js is needed only for the JavaScript tests. Rust and Tauri are needed to build the native desktop window. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-Download and extract the source archive for the release. If you use Git, these commands check out the source for version 0.3.0.
+Download and extract the source archive for the release. If you use Git, these commands check out the source for version 0.4.0.
 
 ~~~sh
-git clone --branch v0.3.0 --depth 1 https://github.com/Jwarren-ENG/prediction-market-bot.git pmb
+git clone --branch v0.4.0 --depth 1 https://github.com/Jwarren-ENG/prediction-market-bot.git pmb
 cd pmb
 ~~~
 
@@ -119,7 +119,7 @@ python3 -I -B pmb.py replay-check
 
 ## Build the native packages
 
-Use a source checkout at the same tag as the package you want to reproduce. The following recipes target **v0.3.0**. The native build needs a current stable Rust toolchain, Cargo, Python 3.12 or later and the platform tools below. Run all commands from the repository root. Package to a fresh output directory. The packager refuses to overwrite a previous app or installer, and the runtime fetcher expects its destination to be new. Runtime archives are pinned by version and SHA-256 in the repository. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) · [Runtime pins](../scripts/fetch_runtime.py) · [Third-party notices](THIRD_PARTY.md)
+Use a source checkout at the same tag as the package you want to reproduce. The following recipes target **v0.4.0**. The native build needs a current stable Rust toolchain, Cargo, Python 3.12 or later and the platform tools below. Run all commands from the repository root. Package to a fresh output directory. The packager refuses to overwrite a previous app or installer, and the runtime fetcher expects its destination to be new. Runtime archives are pinned by version and SHA-256 in the repository. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) · [Runtime pins](../scripts/fetch_runtime.py) · [Third-party notices](THIRD_PARTY.md)
 
 **macOS universal ZIP.** Install Xcode Command Line Tools and Rust with rustup on the build Mac. Both Rust targets are needed even when the machine itself is Apple Silicon. The packager uses `lipo` for the universal executable and includes both runtimes.
 
@@ -141,7 +141,7 @@ python3 scripts/package.py --platform macos \
 codesign --verify --deep --strict "dist-macos/Prediction Market Bot.app"
 "dist-macos/Prediction Market Bot.app/Contents/MacOS/pmb-worker" replay-check
 ditto -c -k --sequesterRsrc --keepParent "dist-macos/Prediction Market Bot.app" \
-  "dist-macos/PMB-0.3.0-macOS-Universal.zip"
+  "dist-macos/PMB-0.4.0-macOS-Universal.zip"
 ~~~
 
 For a build for your Mac’s own architecture, run `cargo build --manifest-path desktop/Cargo.toml --locked --release`, fetch just the runtime for that architecture, use `desktop/target/release/prediction-market-bot` as `--binary` and omit both Intel companion options. Label that ZIP with the architecture it contains. A shell built without packaging needs a matching bundled worker payload to start. The packager applies and verifies an ad hoc signature by default. Developer ID signing and Apple notarization are separate release operations.
@@ -163,7 +163,7 @@ $nsis = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS\makens
 if (-not (Test-Path $nsis)) { throw 'Set $nsis to the installed makensis.exe.' }
 
 py -3.13 scripts/package.py --platform windows --binary desktop/target/release/prediction-market-bot.exe --runtime build/runtime-win-x64 --bootstrap $bootstrap --makensis $nsis --out dist-windows
-Get-FileHash -Algorithm SHA256 'dist-windows/PMB-0.3.0-Windows-x64-Setup.exe'
+Get-FileHash -Algorithm SHA256 'dist-windows/PMB-0.4.0-Windows-x64-Setup.exe'
 ~~~
 
 The resulting PMB setup executable is unsigned. Install it using the Windows procedure above, run the packaged replay, and open the native window to check it on Windows. The **Native paper desk** GitHub Actions workflow has separate macOS and Windows jobs. It runs the test suites and exercises packaged components on the target hosts. Select a run for the commit you are installing to inspect its outcome. [Build workflow](../.github/workflows/native.yml) · [Actions runs](https://github.com/Jwarren-ENG/prediction-market-bot/actions) · [Packaging flags](../scripts/package.py)

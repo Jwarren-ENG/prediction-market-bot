@@ -41,11 +41,13 @@ class BitcoinTrials:
                 self.accounts[key].set_auto(False)
                 self.sync(key)
 
-    def snapshot(self, *, comparison=False):
+    def snapshot(self, *, comparison=False, equity_account=None, equity_minutes=None):
         accounts = {}
         result = {"bitcoin_brokers": accounts}
         for key, account in self.accounts.items():
-            state = account.state()
+            state = account.state(equity_minutes=equity_minutes) if key == equity_account else account.state()
+            if "portfolio_history" in state:
+                result["portfolio_history"] = state.pop("portfolio_history")
             if comparison:
                 accounts[key] = {
                     name: state.get(name)

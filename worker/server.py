@@ -18,7 +18,7 @@ from urllib.error import URLError
 from urllib.parse import urlsplit, unquote, parse_qs
 from urllib.request import Request, build_opener, ProxyHandler
 
-from . import monitoring
+from . import equity, monitoring
 from .bitcoin import BitcoinPaper, quote_fresh
 from .btc_trials import BitcoinTrials
 from .feeds import collect
@@ -32,7 +32,7 @@ from .weather import instant
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47823
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 LOG = logging.getLogger("pmb")
 
 
@@ -66,6 +66,11 @@ class Desk:
         self.next_pair = 0.0
         self.interval = interval
         self.started = utc()
+        with self.store.connection() as db:
+            db.execute(equity.SCHEMA)
+            recent = int(instant(self.started).timestamp()) // 300 - 8*288
+            self.ledgers["forward"].import_equity(db.execute(
+                "SELECT at,weather FROM paired_equity WHERE bucket>=? ORDER BY bucket,opening DESC", (recent,)))
         self.heartbeat = self.started
         self.scan_started = None
         self.active_scan_id = None
@@ -125,12 +130,21 @@ class Desk:
             "reason": reason,
         }
 
-    def desk_snapshot(self, desk):
+    def desk_snapshot(self, desk, *, equity_account=None, equity_minutes=None):
         """Independent desktop reads share only the worker heartbeat."""
         snapshot = {"version": VERSION, "health": {"online": self.online, "heartbeat": self.heartbeat}}
         if desk == "bitcoin":
-            snapshot["bitcoin"] = self.bitcoin.state()
-            snapshot.update(self.bitcoin_trials.snapshot())
+            snapshot["bitcoin"] = self.bitcoin.state(equity_minutes=equity_minutes if equity_account == "spot" else None)
+            if "portfolio_history" in snapshot["bitcoin"]:
+                snapshot["portfolio_history"] = snapshot["bitcoin"].pop("portfolio_history")
+            snapshot.update(self.bitcoin_trials.snapshot(equity_account=equity_account, equity_minutes=equity_minutes))
+            if equity_account == "bitcoin_total":
+                spot = snapshot["bitcoin"]["portfolio"]
+                values = [row["portfolio"]["equity_cents"] for row in snapshot["bitcoin_brokers"].values()]
+                values.append(spot["equity_cents"] if spot["mark_fresh"] else None)
+                with self.store.connection() as db:
+                    snapshot["portfolio_history"] = equity.history(db, equity_account, equity_minutes,
+                        instant(utc()), None if None in values else sum(values))
         elif desk == "comparison":
             with self.store.connection() as db:
                 snapshot["comparison"] = monitoring.comparison(db)
@@ -138,9 +152,9 @@ class Desk:
             snapshot.update(self.bitcoin_trials.snapshot(comparison=True))
         return snapshot
 
-    def state(self, *, activity_hours=None, bitcoin=False):
+    def state(self, *, activity_hours=None, bitcoin=False, equity_minutes=None):
         mode = self.mode()
-        output = self.ledgers[mode].state()
+        output = self.ledgers[mode].state(equity_minutes=equity_minutes, equity_account=mode)
         saved = self.store.get("forward_health", {})
         scans = self.store.scan_history()
         scan = (
@@ -254,6 +268,16 @@ class Desk:
                                                    active["initial_cash_cents"], hold["initial_cash_cents"], opening=True)
                             db.commit()
                 monitoring.record_pair(db, at, weather["equity_cents"], active["equity_cents"], hold["equity_cents"])
+
+    def record_portfolios(self):
+        with self.transition:
+            at = utc()
+            now = instant(at)
+            self.ledgers["forward"].sample_equity(now)
+            values = [account.current_equity(now) for account in self.bitcoin_trials.accounts.values()]
+            values.append(self.bitcoin.current_equity(now))
+            with self.store.connection() as db:
+                equity.record(db, at, None if None in values else sum(values))
 
     def scan(self, *, scheduled=False):
         with self.transition:
@@ -471,6 +495,7 @@ class Desk:
                 if self.online and time.monotonic() >= self.next_pair:
                     self.next_pair = time.monotonic() + 20
                     try:
+                        self.record_portfolios()
                         self.record_comparison()
                     except Exception:
                         LOG.exception("Could not record a common portfolio mark")
@@ -662,16 +687,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/notifications/preview":
             return self.reply(200, self.server.desk.notifications.preview())
         if path in ("/api/bitcoin", "/api/comparison", "/api/status", "/api/state"):
-            params = parse_qs(urlsplit(self.path).query)
+            params = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+            chart = params.get("equity", [])
+            windows = params.get("minutes", [])
+            minutes = None
+            if chart or windows:
+                accounts = {"/api/state": {"weather"},
+                            "/api/bitcoin": {"spot", "bitcoin_total", *self.server.desk.bitcoin_trials.accounts}}
+                if (len(chart) != 1 or chart[0] not in accounts.get(path, ())
+                        or len(windows) != 1 or windows[0] not in {str(n) for n in equity.WINDOWS}):
+                    return self.reply(400, {"error": "Choose a portfolio account and a supported time window."})
+                minutes = int(windows[0])
             hours = params.get("activity_hours", [None])[0]
             if hours is not None and hours not in {"24", "48", "168"}:
                 return self.reply(400, {"error": "Choose 24, 48 or 168 activity hours."})
             try:
                 if path != "/api/state":
-                    return self.reply(200, self.server.desk.desk_snapshot(path.removeprefix("/api/")))
+                    return self.reply(200, self.server.desk.desk_snapshot(
+                        path.removeprefix("/api/"), equity_account=chart[0] if chart else None, equity_minutes=minutes))
                 return self.reply(200, self.server.desk.state(
                     activity_hours=int(hours) if hours else None,
                     bitcoin=params.get("workspace") == ["bitcoin"],
+                    equity_minutes=minutes,
                 ))
             except Exception:
                 LOG.exception("Snapshot failed")
