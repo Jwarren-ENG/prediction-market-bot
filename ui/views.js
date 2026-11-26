@@ -79,7 +79,8 @@ export function activityView(state, ui) {
     return valid && at >= begin && at < end;
   });
   const markets = new Map(arr(state.markets).map(m => [m.id,m]));
-  const kinds = [...new Set(entries.map(r => r.kind).filter(Boolean))];
+  const kinds = new Set(entries.map(r => r.kind).filter(Boolean));
+  if (ui.activityFilter && ui.activityFilter !== 'All events') kinds.add(ui.activityFilter);
   const shown = entries.filter(r => ui.activityFilter === 'All events' || r.kind === ui.activityFilter);
   const select = `<div class="filter">${icon('filter',15)}<select id="activity-filter" aria-label="Filter activity by event type">${['All events',...kinds].map(k =>
     `<option value="${esc(k)}"${k === ui.activityFilter ? ' selected' : ''}>${k === 'All events' ? k : esc(human(k))}</option>`).join('')}</select></div>`;

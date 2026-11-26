@@ -17,6 +17,15 @@ test('daily activity collapses only matching decisions and retains contract rece
   assert.match(historyPanel(null,168),/Loading recorded activity/);
 });
 
+test('event filter stays visible when a shorter activity window has no matching receipts', async () => {
+  const {activityView} = await import('../ui/views.js');
+  const state = {mode:'replay', activity:[], markets:[], activity_history:{
+    hours:24, start_at:60000, end_at:86460000, bin_seconds:3600, decisions:{counts:Array(24).fill(0)}}};
+  const html = activityView(state,{activityHours:24,activityFilter:'fill'});
+  assert.match(html,/<option value="fill" selected>Fill<\/option>/);
+  assert.match(html,/No matching events/);
+});
+
 let time, scanButton, latestPriceMoves;
 before(async () => {
   time = await import('../ui/time.js');
