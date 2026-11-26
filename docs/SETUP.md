@@ -1,6 +1,6 @@
 # Set up Prediction Market Bot
 
-Prediction Market Bot (PMB) lets you practice on the daily high temperature in New York’s Central Park. It runs a private worker on your computer and starts two independent paper accounts with $10,000 each. You can try the complete replay without an exchange account, payment method, API key, or an internet connection once the app is installed. An online worker can collect public weather and market data. [Project repository](https://github.com/Jwarren-ENG/prediction-market-bot) · [Releases and asset downloads](https://github.com/Jwarren-ENG/prediction-market-bot/releases)
+Prediction Market Bot (PMB) runs a private worker for Central Park weather, Bitcoin spot and three Bitcoin contract intervals. Each Bitcoin contract trial has its own $10,000 in paper cash. The offline weather replay runs without a login or internet connection after installation. For current quotes, enable the public feed in the relevant workspace. [Project repository](https://github.com/Jwarren-ENG/prediction-market-bot) · [Releases and asset downloads](https://github.com/Jwarren-ENG/prediction-market-bot/releases)
 
 | What you want to do | Start here |
 | --- | --- |
@@ -17,7 +17,7 @@ Prediction Market Bot (PMB) lets you practice on the daily high temperature in N
 3. Open the app. The distributed Mac build carries an ad hoc signature and lacks Apple Developer ID notarization. macOS may ask you to review it. Confirm the download source and use the per-app approval procedure appropriate for your system or choose the source installation. [Apple’s guide to downloaded apps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
 4. A clean workspace opens in **Research** with the synthetic replay already populated. Open **Worker** and find **Worker health** to see the version, heartbeat and operating mode. Window startup can take a few seconds.
 
-You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it. For example, to calculate the digest for the version 0.2.1 archive in Downloads, run `shasum -a 256 "$HOME/Downloads/PMB-0.2.1-macOS-Universal.zip"`.
+You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it. For example, to calculate the digest for the version 0.3.0 archive in Downloads, run `shasum -a 256 "$HOME/Downloads/PMB-0.3.0-macOS-Universal.zip"`.
 
 ~~~sh
 app="$HOME/Applications/Prediction Market Bot.app"
@@ -28,7 +28,7 @@ worker="$app/Contents/MacOS/pmb-worker"
 
 ## Install on Windows
 
-1. Download the **Windows x64 Setup.exe** asset from the same GitHub release. For version 0.2.1, its name is `PMB-0.2.1-Windows-x64-Setup.exe`. If checksums accompany the download, use PowerShell’s `Get-FileHash -Algorithm SHA256` with the installer path and compare the result.
+1. Download the **Windows x64 Setup.exe** asset from the same GitHub release. For version 0.3.0, its name is `PMB-0.3.0-Windows-x64-Setup.exe`. If checksums accompany the download, use PowerShell’s `Get-FileHash -Algorithm SHA256` with the installer path and compare the result.
 2. Run the installer under the Windows account that will own the practice desk. Review its bundled component terms on the agreement screen. By default it installs under `%LOCALAPPDATA%\Programs\Prediction Market Bot`. The PMB installer is unsigned. Review your organization’s software policy if Windows asks about the publisher.
 3. The normal installer checks for Microsoft Edge WebView2. If the runtime is missing, the included Microsoft bootstrapper uses the network to install it. On an offline or managed PC, an administrator can provision Microsoft’s Evergreen Runtime before installation. [Microsoft WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
 4. Open **Start → Prediction Market Bot → Prediction Market Bot**. Find **Research** and **Worker**. Python is included in the package. If the native window cannot open, you can still check the installed worker using PowerShell.
@@ -62,20 +62,21 @@ For the browser interface, run `& $python -I -B $entry serve` in one private Pow
 
 ## Start the Bitcoin paper trial
 
-1. Open the workspace picker beside the PMB mark at the top left. Choose **Bitcoin**. Your selection persists on this device. Return to **Central Park weather** through the same picker. **Options** opens its development status.
-2. **15-minute markets** opens first. With Kalshi market reads enabled, it follows the active contract and resets the live quote history for each new window. To view BTC/USD itself, select **Spot strategy** and turn on **BTC collection** for private research on your computer. The worker reads Bitstamp’s BTC/USD book and completed candles. Check the exchange timestamp, worker receipt and displayed bid and ask. Choose **24 hours**, **48 hours** or **7 days** for price history. Bitstamp directs companies intending commercial exchange-data use to its data licensing process. [Bitstamp API and data terms](https://www.bitstamp.net/api/)
-3. Turn on **Paper auto trading**. The strategy starts with $10,000 in paper cash. The maximum initial allocation is $500. A negative or flat seven-day trend targets cash. A positive trend can buy the available paper position once a fresh book has enough size. Disabling Bitcoin auto trading freezes new strategy fills. Existing BTC is still valued when the feed is active. Turning collection off also turns Bitcoin auto trading off.
-4. The passive account buys its initial Bitcoin allocation once when auto trading is on, eight completed closes yield a signal, and the book has enough ask size. Open the top-level **Compare** tab for all three portfolios. Leave Bitcoin spot collection and authorized weather capture on to build this common performance history. A sleeping or disconnected host can miss observations. Look at both the time of the first shared mark and the time of the most recent one.
-5. For a reproducible historical study, use the documented research runner with a private output location. Historical daily opens approximate execution. Forward paper results use received bids, asks and sizes. [Bitcoin study and reproduction steps](BITCOIN_RESEARCH.md)
+1. Choose **Bitcoin** in the upper-left workspace selector. In **Worker**, enable the Kalshi or Polymarket US public feed for the contracts you want to follow. Both Polymarket US intervals share one data permission. Kalshi capture is shared with the weather desk. Account creation, deposits and exchange keys are unnecessary for paper trades.
+2. In **Markets**, choose **5 minutes** (Polymarket US), **15 minutes** (Kalshi), or **1 hour** (Polymarket US). Each opens its own $10,000 paper account. Check the ticker and closing time above the book. Every new window has its own opening target and prices. The clock rolls with the window even when the next quotes take time to arrive.
+3. To place a paper order, select buy or sell, YES or NO, quantity and a per-contract price limit. The worker attempts an immediate full fill at posted prices within your limit, including a separate taker fee. The receipt names the contract, executed price, quantity and fee or gives the reason for rejection. An expired window, a missing fee schedule, a stale book or insufficient size prevents a fill. Open **Portfolio** for holdings and **Activity** for receipts. Selling reduces an existing position. Any remaining units await the venue’s official settlement.
+4. To let the worker choose event-contract trades, turn on the selected interval’s paper auto trading. A new install starts with automation off. Enable each trial you want to run and review its limits in **Worker**. The two US accounts and the Kalshi account keep independent cash and risk controls. Turning off a public feed also pauses its dependent automations. Keep the host online and awake for continuous coverage.
+5. Use **Portfolio** to review today’s results in America/New_York, or the previous completed days when available. Read the count of completed windows and any unmarked positions alongside net gain and fees. The **Compare** tab also includes the weather, spot and passive common-time comparison. [Rule, limits and settlement](HOW_IT_WORKS.md#bitcoin-contract-paper-trading) · [Published bot results and their limitations](BITCOIN_BOT_EVIDENCE.md)
+6. To run the independent spot account, select **Spot strategy**, enable collection, and turn on its daily rule. It reads Bitstamp’s BTC/USD book and completed candles. A manual buy uses a dollar budget including fees, and a manual sale accepts a BTC quantity or the full position. The price limit includes the 0.05% adverse price allowance. Successful manual spot orders turn off its automatic rule until you enable it again. Spot open cost is capped at $500. [Historical spot study](BITCOIN_RESEARCH.md)
 
 ## Run from source
 
 Use Python 3.12 or later for these instructions. The worker and browser interface use Python’s standard library and the assets in `ui/`. Node.js is needed only for the JavaScript tests. Rust and Tauri are needed to build the native desktop window. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-Download and extract the source archive for the release. If you use Git, these commands check out the source for version 0.2.1.
+Download and extract the source archive for the release. If you use Git, these commands check out the source for version 0.3.0.
 
 ~~~sh
-git clone --branch v0.2.1 --depth 1 https://github.com/Jwarren-ENG/prediction-market-bot.git pmb
+git clone --branch v0.3.0 --depth 1 https://github.com/Jwarren-ENG/prediction-market-bot.git pmb
 cd pmb
 ~~~
 
@@ -118,7 +119,7 @@ python3 -I -B pmb.py replay-check
 
 ## Build the native packages
 
-Use a source checkout at the same tag as the package you want to reproduce. The following recipes target **v0.2.1**. The native build needs a current stable Rust toolchain, Cargo, Python 3.12 or later and the platform tools below. Run all commands from the repository root. Package to a fresh output directory. The packager refuses to overwrite a previous app or installer, and the runtime fetcher expects its destination to be new. Runtime archives are pinned by version and SHA-256 in the repository. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) · [Runtime pins](../scripts/fetch_runtime.py) · [Third-party notices](THIRD_PARTY.md)
+Use a source checkout at the same tag as the package you want to reproduce. The following recipes target **v0.3.0**. The native build needs a current stable Rust toolchain, Cargo, Python 3.12 or later and the platform tools below. Run all commands from the repository root. Package to a fresh output directory. The packager refuses to overwrite a previous app or installer, and the runtime fetcher expects its destination to be new. Runtime archives are pinned by version and SHA-256 in the repository. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) · [Runtime pins](../scripts/fetch_runtime.py) · [Third-party notices](THIRD_PARTY.md)
 
 **macOS universal ZIP.** Install Xcode Command Line Tools and Rust with rustup on the build Mac. Both Rust targets are needed even when the machine itself is Apple Silicon. The packager uses `lipo` for the universal executable and includes both runtimes.
 
@@ -140,7 +141,7 @@ python3 scripts/package.py --platform macos \
 codesign --verify --deep --strict "dist-macos/Prediction Market Bot.app"
 "dist-macos/Prediction Market Bot.app/Contents/MacOS/pmb-worker" replay-check
 ditto -c -k --sequesterRsrc --keepParent "dist-macos/Prediction Market Bot.app" \
-  "dist-macos/PMB-0.2.1-macOS-Universal.zip"
+  "dist-macos/PMB-0.3.0-macOS-Universal.zip"
 ~~~
 
 For a build for your Mac’s own architecture, run `cargo build --manifest-path desktop/Cargo.toml --locked --release`, fetch just the runtime for that architecture, use `desktop/target/release/prediction-market-bot` as `--binary` and omit both Intel companion options. Label that ZIP with the architecture it contains. A shell built without packaging needs a matching bundled worker payload to start. The packager applies and verifies an ad hoc signature by default. Developer ID signing and Apple notarization are separate release operations.
@@ -162,7 +163,7 @@ $nsis = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS\makens
 if (-not (Test-Path $nsis)) { throw 'Set $nsis to the installed makensis.exe.' }
 
 py -3.13 scripts/package.py --platform windows --binary desktop/target/release/prediction-market-bot.exe --runtime build/runtime-win-x64 --bootstrap $bootstrap --makensis $nsis --out dist-windows
-Get-FileHash -Algorithm SHA256 'dist-windows/PMB-0.2.1-Windows-x64-Setup.exe'
+Get-FileHash -Algorithm SHA256 'dist-windows/PMB-0.3.0-Windows-x64-Setup.exe'
 ~~~
 
 The resulting PMB setup executable is unsigned. Install it using the Windows procedure above, run the packaged replay, and open the native window to check it on Windows. The **Native paper desk** GitHub Actions workflow has separate macOS and Windows jobs. It runs the test suites and exercises packaged components on the target hosts. Select a run for the commit you are installing to inspect its outcome. [Build workflow](../.github/workflows/native.yml) · [Actions runs](https://github.com/Jwarren-ENG/prediction-market-bot/actions) · [Packaging flags](../scripts/package.py)
@@ -257,7 +258,7 @@ Check **Worker → Email notifications** for readiness, delivery failures and am
 | Windows | `%LOCALAPPDATA%\Prediction Market Bot` |
 | Linux | `$XDG_DATA_HOME/prediction-market-bot` or `~/.local/share/prediction-market-bot` |
 
-`replay.sqlite` and `forward.sqlite` contain separate weather accounts. `bitcoin.sqlite` stores the Bitcoin strategy and passive account. `worker.sqlite` holds settings, scan receipts, paired performance observations, analyst notes and mail state. `feeds/feeds.sqlite3` contains the collected point-in-time inputs and outcomes. `access.key` grants control of the worker. Treat the entire workspace and its backups as private. The display’s 15-second quote tape is memory only. The weather desk can retrieve completed minute and hourly price history again from the venue.
+`replay.sqlite` and `forward.sqlite` contain separate weather accounts. `bitcoin.sqlite` stores the Bitcoin spot strategy, its manual order receipts and its passive account. Each `btc-contract-paper-*.sqlite` file holds one Bitcoin event-contract account, including orders, settlements, limits and Eastern daily results. `worker.sqlite` holds settings, scan receipts, paired performance observations, analyst notes and mail state. `feeds/feeds.sqlite3` contains the collected point-in-time inputs and outcomes. `access.key` grants control of the worker. Treat the entire workspace and its backups as private. The display’s 15-second quote tape is memory only. The weather desk can retrieve completed minute and hourly price history again from the venue.
 
 1. Close the app. Remove or stop its supervisor, then issue the matching packaged or source `stop` command. For systemd, use `systemctl --user stop pmb.service`. Check that the terminal worker exited and the workspace’s `connection.json` is gone before copying databases.
 2. Copy the **entire** workspace, including the `feeds` directory and SQLite sidecar files if present, to private encrypted storage. Record the app version with the backup. Keep this copy intact.

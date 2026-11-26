@@ -16,7 +16,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = "Prediction Market Bot"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 
 def payload(target, runtime, stdlib_notice, windows=False):

@@ -79,6 +79,58 @@
 .btc-contract-empty h2 { margin:0;font-size:1.35rem;font-weight:400; }
 .btc-contract-empty p { color:var(--muted);font-size:.925rem;margin-top:7px;max-width:68ch; }
 .btc-contract-empty .btn { margin-top:14px; }
+.btc-market-trade {
+  display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);align-items:start;gap:16px;
+}
+.btc-worker-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:16px; }
+.btc-market-trade>*,.btc-worker-grid>* { min-width:0; }
+.btc-jump.btn { display:none; }
+@media(min-width:880px) {
+  .btc-market-trade.has-book .btc-current { grid-area:1/1/2/2; }
+  .btc-market-trade.has-book .btc-order { grid-area:1/2/3/3; }
+  .btc-market-trade.has-book .btc-contract-chart { grid-area:2/1/4/2; }
+  .btc-market-trade.has-book .btc-contract-terms { grid-area:3/2/4/3; }
+}
+.btc-order form,.btc-order fieldset,form[data-btc-risk] { min-width:0;margin:0;border:0;padding:0; }
+.btc-order-account { display:flex;flex-wrap:wrap;gap:8px 26px;padding:0 0 12px;margin:0 0 12px;border-bottom:1px solid var(--line); }
+.btc-order-account dt,.btc-filter { color:var(--muted);font-size:.8rem; }
+.btc-order-account dd { font-size:1.12rem;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums; }
+.btc-ticket-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 12px; }
+.btc-ticket-fields label,.btc-filter { display:block;min-width:0;font-size:.82rem; }
+.btc-ticket-fields select,.btc-filter select { display:block;width:100%;max-width:100%;min-height:40px;background:#f2f3f3;border:0;border-bottom:1px solid #838a8d;padding:6px 8px;font-size:.9rem; }
+.btc-ticket-fields input,.btc-ticket-fields select { margin-top:4px; }
+.btc-ticket-fields .btc-full-order { display:flex;gap:7px;align-items:center; }
+.btc-ticket-fields .btc-full-order input { margin:0; }
+.btc-ticket-quote,.btc-order-reason,.btc-ticket-result,.btc-study-results p { font-size:.82rem;line-height:1.5;overflow-wrap:anywhere; }
+.btc-ticket-quote { margin:8px 0 0;color:var(--muted);font-variant-numeric:tabular-nums; }
+.btc-ticket-quote .btn.inline { min-height:36px;padding:0 3px; }
+.btc-order .btc-note,.btc-ticket-result,.btc-order-reason { margin-top:8px; }
+.btc-order .primary,.btc-order form>.secondary,form[data-btc-risk] button { margin-top:14px; }
+.btc-order-reason { color:#745401; }
+.btc-ticket-result { padding:7px 10px;border-left:3px solid var(--blue);background:#f2f6ff; }
+.btc-ticket-result.error { border-color:var(--red);background:#fff2f2; }
+.btc-source-controls { display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 12px; }
+.btc-study-results { margin-top:12px;padding-top:10px;border-top:1px solid var(--line); }
+.btc-study-results h3 { font-size:.92rem;margin:0 0 4px; }
+.btc-research-reading { font-size:.96rem;margin:0 0 10px; }
+.btc-trial-performance { margin-top:16px; }
+.btc-workspace>.btc-trial-performance { margin-top:0; }
+.btc-trials,.btc-account-table { margin:8px 0;font-variant-numeric:tabular-nums; }
+.btc-trials td,.btc-trials th { text-align:right;white-space:nowrap; }
+.btc-trials th:first-child,.btc-account-table th { text-align:left; }
+.btc-trials small { display:block;color:var(--muted); }
+.btc-filter { min-width:9rem;max-width:100%; }
+.btc-filter select { margin-top:3px; }
+@media (max-width:879px) {
+  .btc-market-trade,.btc-worker-grid { grid-template-columns:minmax(0,1fr); }
+  .btc-jump.btn { display:inline-flex; }
+}
+@media(max-width:560px) {
+  .btc-panel-tabs { display:grid;grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .btc-panel-tabs button { min-height:44px; }
+  .btc-ticket-fields select,.btc-filter select,.btc-ticket-quote .btn.inline { min-height:44px; }
+}
+@media(max-width:340px){ .btc-ticket-fields { grid-template-columns:minmax(0,1fr); } }
 .btc-activity { list-style:none;padding:0; }
 .btc-activity li { display:grid;grid-template-columns:minmax(12rem,.55fr) minmax(0,2fr);gap:5px 14px;padding:8px 0;border-top:1px solid var(--line);font-size:.875rem;overflow-wrap:anywhere; }
 .btc-activity li:first-child { border:0;padding-top:0; }

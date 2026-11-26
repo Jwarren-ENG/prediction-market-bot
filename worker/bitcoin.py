@@ -12,6 +12,7 @@ from pathlib import Path
 import sqlite3
 import ssl
 from threading import Event, Lock
+from uuid import UUID
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
@@ -325,6 +326,11 @@ class BitcoinPaper:
                 CREATE TABLE IF NOT EXISTS fills(id INTEGER PRIMARY KEY,account TEXT,signal_day TEXT,side TEXT,
                     at TEXT,sats INTEGER,price TEXT,fee INTEGER,amount INTEGER,quote_at TEXT,
                     UNIQUE(account,signal_day));
+                CREATE INDEX IF NOT EXISTS spot_quote_fills ON fills(account,side,quote_at);
+                CREATE TABLE IF NOT EXISTS manual_spot_orders(
+                    client_id TEXT PRIMARY KEY, request TEXT NOT NULL,
+                    fill_id INTEGER UNIQUE REFERENCES fills(id), rejection TEXT,
+                    CHECK((fill_id IS NULL) != (rejection IS NULL)));
                 CREATE TABLE IF NOT EXISTS marks(bucket INTEGER,baseline INTEGER,at TEXT,equity INTEGER,hold INTEGER,
                     PRIMARY KEY(bucket,baseline));"""
             )
@@ -355,7 +361,7 @@ class BitcoinPaper:
         if type(enabled) is not bool:
             raise ValueError("BTC public-data permission must be on or off.")
         with closing(self._db()) as db, db:
-            db.execute(
+            changed = db.execute(
                 """UPDATE trial SET enabled=?,auto=CASE WHEN ? THEN auto ELSE 0 END,
                         generation=generation+1,next_poll=0,errors=0,status=? WHERE id=1 AND enabled<>?""",
                 (
@@ -368,7 +374,9 @@ class BitcoinPaper:
                     ),
                     enabled,
                 ),
-            )
+            ).rowcount
+            if changed:
+                db.execute("DELETE FROM cache WHERE name='quote'")
         self._wake.set()
 
     def set_auto(self, enabled):
@@ -539,18 +547,28 @@ class BitcoinPaper:
         return db.execute("SELECT * FROM accounts WHERE name=?", (name,)).fetchone()
 
     @staticmethod
+    def _depth_left(db, account, side, book):
+        size = dec(book["ask_size_btc" if side == "buy" else "bid_size_btc"]) * SATOSHIS
+        used = db.execute(
+            "SELECT COALESCE(SUM(sats),0) FROM fills WHERE account=? AND side=? AND quote_at=?",
+            (account["name"], side, book["source_at"]),
+        ).fetchone()[0]
+        return max(0, int(size) - used)
+
+    @staticmethod
     def _fill(db, account, side, sats, book, day, now):
         source = book["ask_usd" if side == "buy" else "bid_usd"]
-        depth = (
-            dec(book["ask_size_btc" if side == "buy" else "bid_size_btc"]) * SATOSHIS
-        )
-        if not 0 < sats <= 2**63 - 1 or sats > depth:
+        if (
+            not 0
+            < sats
+            <= min(2**63 - 1, BitcoinPaper._depth_left(db, account, side, book))
+        ):
             return False
         amount, fee, price = cash_terms(side, sats, source)
         if (
             amount <= 0
             or (side == "buy" and amount > account["cash"])
-            or (side == "sell" and sats != account["sats"])
+            or (side == "sell" and sats > account["sats"])
         ):
             return False
         inserted = db.execute(
@@ -571,17 +589,164 @@ class BitcoinPaper:
         if inserted.rowcount != 1:
             return False
         buying = side == "buy"
+        basis_sold = 0 if buying else account["cost"] * sats // account["sats"]
         db.execute(
             """UPDATE accounts SET cash=?,sats=?,cost=?,realized=?,fills=fills+1,equity=NULL,marked=NULL WHERE name=?""",
             (
                 account["cash"] + (-amount if buying else amount),
-                sats if buying else 0,
-                amount if buying else 0,
-                account["realized"] + (0 if buying else amount - account["cost"]),
+                account["sats"] + (sats if buying else -sats),
+                account["cost"] + (amount if buying else -basis_sold),
+                account["realized"] + (0 if buying else amount - basis_sold),
                 account["name"],
             ),
         )
-        return True
+        return inserted.lastrowid
+
+    @staticmethod
+    def _manual_terms(order):
+        if not isinstance(order, dict):
+            raise ValueError("Enter a spot paper order.")
+        side = order.get("side")
+        size_key = "budget_cents" if side == "buy" else "quantity_btc"
+        if side not in ("buy", "sell") or set(order) != {
+            "client_id",
+            "side",
+            "limit_usd",
+            size_key,
+        }:
+            raise ValueError("Choose a side, size and execution price limit.")
+        try:
+            client_id = str(UUID(order["client_id"]))
+        except (TypeError, ValueError, AttributeError):
+            raise ValueError("A valid spot order ID is required.") from None
+
+        def number(value):
+            if not isinstance(value, str) or not value.isascii():
+                raise ValueError(
+                    "Enter a positive decimal with up to eight decimal places."
+                )
+            whole, dot, fraction = value.partition(".")
+            if not whole.isdecimal() or (
+                dot and (not fraction.isdecimal() or len(fraction) > 8)
+            ):
+                raise ValueError(
+                    "Enter a positive decimal with up to eight decimal places."
+                )
+            parsed = dec(value)
+            if parsed <= 0:
+                raise ValueError("Order amounts and prices must be positive.")
+            return price_text(parsed)
+
+        limit = number(order["limit_usd"])
+        size = order[size_key]
+        if side == "buy":
+            if type(size) is not int or not 1 <= size <= MAX_ENTRY_CENTS:
+                raise ValueError(
+                    "Enter a buy budget from $0.01 through $500, including fees."
+                )
+        elif size != "all":
+            size = number(size)
+        return client_id, {"side": side, size_key: size, "limit_usd": limit}
+
+    @staticmethod
+    def _receipt(row, client_id):
+        return dict(
+            id=row["id"],
+            client_id=client_id,
+            origin="manual",
+            side=row["side"],
+            btc=price_text(Decimal(row["sats"]) / SATOSHIS),
+            price_usd=row["price"],
+            fee_cents=row["fee"],
+            cash_amount_cents=row["amount"],
+            at=row["at"],
+            quote_at=row["quote_at"],
+        )
+
+    def _execute_manual(self, db, terms, client_id):
+        now, side = clock(), terms["side"]
+        enabled = db.execute("SELECT enabled FROM trial WHERE id=1").fetchone()[0]
+        book = self._get(db, "quote")
+        if not self.online or not enabled or not quote_fresh(book, now):
+            raise ValueError(
+                "A fresh Bitstamp quote is required. Check spot collection and try again."
+            )
+        account = self._account(db, "strategy")
+        buy = side == "buy"
+        if buy:
+            budget = terms["budget_cents"]
+            if budget > min(account["cash"], MAX_ENTRY_CENTS - account["cost"]):
+                raise ValueError(
+                    "This buy exceeds available cash or the $500 open-cost limit."
+                )
+            sats = entry_size(budget, book["ask_usd"])
+        else:
+            qty = terms["quantity_btc"]
+            sats = account["sats"] if qty == "all" else int(dec(qty) * SATOSHIS)
+            if not 0 < sats <= account["sats"]:
+                raise ValueError(
+                    "The sale exceeds the BTC available in the spot account."
+                )
+        _, _, price = cash_terms(side, sats, book["ask_usd" if buy else "bid_usd"])
+        limit = dec(terms["limit_usd"])
+        if (buy and price > limit) or (not buy and price < limit):
+            raise ValueError(
+                "The executable price including the spot price allowance is outside your limit."
+            )
+        fill_id = self._fill(db, account, side, sats, book, "manual/" + client_id, now)
+        if not fill_id:
+            raise ValueError(
+                "The requested order cannot fill at the available spot depth and size."
+            )
+        db.execute(
+            "UPDATE trial SET auto=0,generation=generation+1,status=? WHERE id=1",
+            ("Manual spot order filled. Spot automation is paused.",),
+        )
+        self._mark(db, book, now)
+        return fill_id
+
+    def manual_order(self, order):
+        client_id, terms = self._manual_terms(order)
+        request = json.dumps(terms, sort_keys=True, separators=(",", ":"))
+        with closing(self._db()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            prior = db.execute(
+                "SELECT * FROM manual_spot_orders WHERE client_id=?", (client_id,)
+            ).fetchone()
+            if prior:
+                if request != prior["request"]:
+                    raise ValueError(
+                        "This order ID was already used with different terms."
+                    )
+                fill_id, error = prior["fill_id"], prior["rejection"]
+            else:
+                fill_id, error = None, None
+                db.execute("SAVEPOINT manual_fill")
+                try:
+                    fill_id = self._execute_manual(db, terms, client_id)
+                except ValueError as exc:
+                    db.execute("ROLLBACK TO manual_fill")
+                    error = str(exc)
+                finally:
+                    db.execute("RELEASE manual_fill")
+                db.execute(
+                    "INSERT INTO manual_spot_orders VALUES(?,?,?,?)",
+                    (client_id, request, fill_id, error),
+                )
+            if fill_id:
+                fill = db.execute(
+                    "SELECT * FROM fills WHERE id=?", (fill_id,)
+                ).fetchone()
+                return self._receipt(fill, client_id)
+        raise ValueError(error)
+
+    def managed(self):
+        with closing(self._db()) as db:
+            return bool(
+                db.execute(
+                    "SELECT 1 FROM manual_spot_orders WHERE fill_id IS NOT NULL LIMIT 1"
+                ).fetchone()
+            )
 
     def _evaluate(self, db, trial, signal, book, now):
         reason = "BTC paper trading is paused."
@@ -593,16 +758,17 @@ class BitcoinPaper:
                 if not self._fill(db, hold, "buy", qty, book, signal["day"], now):
                     return "Waiting for sufficient ask size to start the strategy and buy-and-hold comparison."
                 db.execute("UPDATE trial SET started=? WHERE id=1", (stamp(now),))
-                db.execute(
-                    "INSERT INTO marks VALUES(?,?,?,?,?)",
-                    (
-                        int(now.timestamp()) // 300,
-                        1,
-                        stamp(now),
-                        START_CENTS,
-                        START_CENTS,
-                    ),
-                )
+                if not self._account(db, "strategy")["fills"]:
+                    db.execute(
+                        "INSERT INTO marks VALUES(?,?,?,?,?)",
+                        (
+                            int(now.timestamp()) // 300,
+                            1,
+                            stamp(now),
+                            START_CENTS,
+                            START_CENTS,
+                        ),
+                    )
             account = self._account(db, "strategy")
             if target == "long" and not account["sats"]:
                 budget = min(MAX_ENTRY_CENTS, account["cash"] // 20)
@@ -628,7 +794,10 @@ class BitcoinPaper:
                 )
         elif trial["auto"]:
             reason = signal["reason"]
-        if db.execute("SELECT started FROM trial WHERE id=1").fetchone()[0]:
+        if (
+            db.execute("SELECT started FROM trial WHERE id=1").fetchone()[0]
+            or self._account(db, "strategy")["fills"]
+        ):
             if not self._mark(db, book, now):
                 reason += (
                     " Waiting for sufficient bid size to value the full open position."
@@ -639,7 +808,7 @@ class BitcoinPaper:
         values = []
         for name in ("strategy", "hold"):
             a = self._account(db, name)
-            if a["sats"] > dec(book["bid_size_btc"]) * SATOSHIS:
+            if a["sats"] > self._depth_left(db, a, "sell", book):
                 continue
             liquid = (
                 cash_terms("sell", a["sats"], book["bid_usd"])[0] if a["sats"] else 0
@@ -723,7 +892,12 @@ class BitcoinPaper:
             activities = []
             for x in db.execute("SELECT * FROM fills ORDER BY id DESC LIMIT 40"):
                 btc = price_text(Decimal(x["sats"]) / SATOSHIS)
-                who = "Buy-and-hold" if x["account"] == "hold" else "BTC strategy"
+                manual = x["signal_day"].startswith("manual/")
+                who = (
+                    "Manual BTC"
+                    if manual
+                    else "Buy-and-hold" if x["account"] == "hold" else "BTC strategy"
+                )
                 message = f"{who} paper {'buy' if x['side']=='buy' else 'sale'} of {btc} BTC at ${Decimal(x['price']):,.2f}."
                 activities.append(
                     dict(
@@ -737,7 +911,12 @@ class BitcoinPaper:
                         price_usd=x["price"],
                         fee_cents=x["fee"],
                         cash_amount_cents=x["amount"],
-                        signal_day=x["signal_day"],
+                        origin=(
+                            "manual"
+                            if manual
+                            else "benchmark" if x["account"] == "hold" else "auto"
+                        ),
+                        signal_day=None if manual else x["signal_day"],
                         quote_at=x["quote_at"],
                     )
                 )
@@ -748,6 +927,9 @@ class BitcoinPaper:
                 fee_bps=60,
                 adverse_execution_bps=5,
                 max_entry_cents=MAX_ENTRY_CENTS,
+                manual_trades=db.execute(
+                    "SELECT count(*) FROM manual_spot_orders WHERE fill_id IS NOT NULL"
+                ).fetchone()[0],
                 enabled=bool(trial["enabled"]),
                 auto_enabled=bool(trial["auto"]),
                 online=self.online,

@@ -1,7 +1,11 @@
 import {arr, button, clock, count, dash, day, esc, field, headline, icon, instant, money, num, price, sourceLink, stamp, zoneLabel} from './common.js';
 import {chartTimeAxis, timeBounds} from './markets.js';
+import {brokerFor, contractAuto, feedFor, orderTicket, venues} from './bitcoin-trading.js';
+import {trialPerformance} from './bitcoin-performance.js';
 
 export const bitcoinRanges = new Map([[1440,'24 hours'],[2880,'48 hours'],[10080,'7 days']]);
+export const bitcoinPanels = new Map([['contracts','Kalshi · 15 min'],['poly5','Polymarket US · 5 min'],['poly60','Polymarket US · 1 hour'],['spot','Spot strategy']]);
+export const panelVenues = {contracts:'kalshi',poly5:'polymarket_us',poly60:'polymarket_us_hourly'};
 const hour = 3_600_000;
 const usd = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2});
 const tickUsd = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:0,maximumFractionDigits:2});
@@ -108,7 +112,7 @@ function bitcoinHistory(market, ui) {
         ${rows.length ? `<details class="quote-observations" data-key="btc-closes"><summary>Hourly closes (${rows.length})</summary><div class="table-scroll" tabindex="0" role="region" aria-label="Bitstamp hourly closing prices"><table class="data-table"><thead><tr><th scope="col">Period ended</th><th scope="col">BTC / USD close</th></tr></thead><tbody>${rows.map(p=>`<tr data-key="${p.at}"><td>${esc(day(p.at,true))} · ${esc(clock(p.at))} ${esc(zoneLabel(p.at))}</td><td class="numeric">${dollars(p.close)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
       </section></div></section>`;
 }
-function bitcoinAccount(market) {
+export function bitcoinAccount(market) {
   const p = market.portfolio || {};
   const latest = p.marked_at || arr(market.history).at(-1)?.at;
   const passive = market.benchmark;
@@ -120,7 +124,7 @@ function bitcoinAccount(market) {
     <dl class="field-list">${field('Starting cash',money(p.initial_cash_cents))}${field('Available cash',money(p.cash_cents))}${field('Bitcoin position',btc(p.btc))}${field('Realized gain / loss',money(p.realized_cents,true))}${field('Paper fills',count(p.filled_orders))}</dl>
     ${latest ? `<p class="btc-note">Last equity mark ${esc(stamp(latest))}.</p>` : ''}${market.started_at ? `<p class="btc-note">Trial started ${esc(stamp(market.started_at))}.</p>` : '<p class="btc-note">The trial begins with the first eligible decision while paper trading is on.</p>'}${benchmark}</div></section>`;
 }
-function bitcoinSignal(market) {
+export function bitcoinSignal(market) {
   const s = market.signal || {};
   const target = {long:'Hold bitcoin',cash:'Hold cash'}[s.target] || 'Awaiting completed daily closes';
   return `<section class="panel">${sectionTitle('Daily signal')}<div class="panel-body"><h3 class="btc-target">${esc(target)}</h3>
@@ -129,7 +133,7 @@ function bitcoinSignal(market) {
 }
 export function comparisonView(state,ui) {
   const c = state.comparison || {}, accounts = c.accounts || {};
-  const rows = [['weather','Central Park strategy'],['bitcoin','Bitcoin spot strategy'],['hold','Passive $500 BTC hold']];
+  const rows = [['weather','Central Park strategy'],['bitcoin',c.bitcoin_managed ? 'Bitcoin spot (managed)' : 'Bitcoin spot strategy'],['hold','Passive $500 BTC hold']];
   const start = atMs(c.start_at), end = atMs(c.as_of);
   const ready = start !== null && end !== null && end >= start && rows.every(([id]) =>
     num(accounts[id]?.start_cents) !== null && num(accounts[id]?.end_cents) !== null);
@@ -141,16 +145,16 @@ export function comparisonView(state,ui) {
     '<p class="btc-empty">Waiting for the first shared equity marks from the Bitcoin and Central Park paper accounts.</p>';
   return `${headline('Compare','Forward paper accounts')}<section class="panel btc-comparison">${sectionTitle('Strategy comparison')}<div class="panel-body">
     ${ui?.connected === false ? '<p class="btc-note">Worker disconnected. Showing the last received comparison.</p>' : ''}${data}
-    <p class="btc-note">Returns and drawdowns use marks recorded for all three accounts at the same times. The passive benchmark buys up to $500 of BTC and holds the remaining cash.</p></div></section>`;
+    <p class="btc-note">Returns and drawdowns use marks recorded for all three accounts at the same times. The passive benchmark buys up to $500 of BTC and holds the remaining cash.${c.bitcoin_managed?' The managed spot account includes manual paper orders.':''}</p></div></section>${trialPerformance(state)}`;
 }
 function bitcoinActivity(market) {
   const entries=arr(market.activity).filter(e=>typeof e?.message === 'string').sort((a,b)=>(atMs(b.at)||0)-(atMs(a.at)||0)).slice(0,8);
   return `<section class="panel">${sectionTitle('Recent Bitcoin decisions')}<div class="panel-body">${entries.length ? `<ol class="btc-activity">${entries.map(e=>`<li data-key="${esc(e.id ?? e.at)}"><time>${esc(stamp(e.at))}</time><span>${esc(e.message)}</span></li>`).join('')}</ol>` : '<p class="btc-empty">The worker will record Bitcoin paper decisions here.</p>'}</div></section>`;
 }
 const contractStatuses = {
-  live:'Receiving public quotes', partial:'Partial market data', waiting:'Waiting for the first Kalshi quote',
-  empty:'Waiting for the next contract', stale:'Quotes delayed', error:'Kalshi request failed',
-  rate_limited:'Kalshi rate limit', offline:'Worker offline', disabled:'Kalshi market capture is off',
+  live:'Receiving public quotes', partial:'Partial market data', waiting:'Waiting for the first venue quote',
+  empty:'Waiting for the next contract', stale:'Quotes delayed', error:'Venue request failed', restricted:'Venue access restricted',
+  rate_limited:'Venue rate limit', offline:'Worker offline', disabled:'Public market capture is off',
   disconnected:'Worker disconnected', unavailable:'Waiting for the Bitcoin contract feed',
 };
 const contractFields = ['yes_bid_cents','yes_ask_cents','no_bid_cents','no_ask_cents'];
@@ -182,7 +186,7 @@ function contractHistory(market, now) {
 function shortTime(at) {
   return atMs(at) === null ? dash : `${clock(at)} ${zoneLabel(at)}`;
 }
-function oddsChart(market, points, interval) {
+function oddsChart(market, points, interval, venue) {
   const start = atMs(market.open_at), end = atMs(market.close_at);
   if (start === null || end === null || end <= start) return '<p class="btc-empty">Waiting for the venue’s contract times.</p>';
   const span = timeBounds(start,end), axis = chartTimeAxis({minutes:(end-start)/60000,start,end,long:false});
@@ -198,7 +202,7 @@ function oddsChart(market, points, interval) {
     ${ticks.map(n=>`<line class="quote-gridline" x1="0" x2="1000" y1="${y(n)}" y2="${y(n)}"/>`).join('')}${lines}</svg></div>${axis}</div>` :
     `<div class="quote-plot"><p class="quote-chart-empty">No asking prices have been captured for this window.</p>${axis}</div>`;
   const receipts = points.length ? `<details class="quote-observations" data-key="btc-odds-${esc(market.id)}"><summary>Quote receipts (${count(points.length)})</summary>
-    <div class="table-scroll" role="region" tabindex="0" aria-label="Kalshi Bitcoin book receipts"><table class="data-table btc-book-receipts">
+    <div class="table-scroll" role="region" tabindex="0" aria-label="${venues[venue].label} Bitcoin book receipts"><table class="data-table btc-book-receipts">
     <thead><tr><th scope="col">Received · ${esc(zoneLabel(start))}</th><th scope="col">YES bid</th><th scope="col">YES ask</th><th scope="col">NO bid</th><th scope="col">NO ask</th></tr></thead>
     <tbody>${[...points].reverse().map(p=>`<tr data-key="${p.at}"><th scope="row"><time datetime="${new Date(p.at).toISOString()}">${esc(shortTime(p.at))}</time></th>${p.gap ? '<td colspan="4">Quote unavailable</td>' : contractFields.map(key=>`<td>${price(p[key])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></details>` : '';
   return `<section class="panel market-chart btc-contract-chart" aria-labelledby="btc-odds-title">
@@ -215,14 +219,15 @@ function oddsSide(side, prices, delta, market) {
     <span class="btc-odds-bid">Bid <b>${price(bid)}</b>${size !== null ? ` · ${count(size)} ${size === 1 ? 'contract' : 'contracts'} at ask` : ''}</span>
     ${movement ? `<small>${esc(movement)}</small>` : ''}</div>`;
 }
-function contractTerms(market) {
+export function contractTerms(market,venue='kalshi') {
   const rules = [market.rules_primary,market.rules_secondary].filter(t=>typeof t === 'string' && t.trim());
+  const indexLabel=venue==='kalshi' || /cfbenchmarks\.com\/data\/indices\/BRTI/i.test(market.index_url || '') ? 'CF Benchmarks BRTI' : 'See venue rules';
   return `<section class="panel btc-contract-terms">${sectionTitle('Contract terms')}<div class="panel-body">
     <dl class="field-list">${field('Opening target',dollars(market.target_usd))}${field('Opens',stamp(market.open_at))}${field('Closes',stamp(market.close_at))}
-    ${field('Settlement index','CF Benchmarks BRTI')}</dl>
-    <p class="btc-note">YES pays $1 if the closing 60-second index average is at least the opening average. Otherwise NO pays $1.</p>
+    ${field('Settlement index',indexLabel)}</dl>
+    ${venue==='kalshi' ? '<p class="btc-note">YES pays $1 if the closing 60-second index average is at least the opening average. Otherwise NO pays $1.</p>' : '<p class="btc-note">YES is Up. NO is Down. The venue’s contract terms specify the reference prices and settlement condition.</p>'}
     ${rules.length ? `<details class="btc-contract-rules" data-key="btc-rules-${esc(market.id)}"><summary>Read venue rules</summary>${rules.map(t=>`<p>${esc(t)}</p>`).join('')}</details>` : ''}
-    <div class="btc-source-links">${market.rules_url ? sourceLink('Kalshi rules',market.rules_url) : ''}${market.index_url ? sourceLink('Settlement index',market.index_url) : ''}</div></div></section>`;
+    <div class="btc-source-links">${market.rules_url ? sourceLink(venues[venue].name+' rules',market.rules_url) : ''}${market.index_url ? sourceLink('Settlement index',market.index_url) : ''}</div></div></section>`;
 }
 function previousWindows(recent,now) {
   const rows = arr(recent).filter(m=>m && atMs(m.close_at) !== null && atMs(m.close_at) <= now)
@@ -234,8 +239,8 @@ function previousWindows(recent,now) {
       return `<tr data-key="${esc(m.id)}"><th scope="row">${esc(stamp(m.close_at))}</th><td>${dollars(m.target_usd)}</td><td>${price(last?.yes_ask_cents)}</td><td>${price(last?.no_ask_cents)}</td><td>${esc(stamp(last?.at))}</td></tr>`;
     }).join('')}</tbody></table></div></div></section>`;
 }
-function contractMonitor(state,ui) {
-  const feed = state.bitcoin_contracts || {}, now = Number.isFinite(ui.now) ? ui.now : Date.now();
+function contractMonitor(state,ui,venue) {
+  const feed=feedFor(state,venue), spec=venues[venue], now=Number.isFinite(ui.now)?ui.now:Date.now();
   let status = !ui.connected ? 'disconnected' : feed.status || (state.health?.online === false ? 'offline' : 'unavailable');
   if (ui.connected && feed.enabled === false && status !== 'offline') status = 'disabled';
   if (!Object.hasOwn(contractStatuses,status)) status = 'unavailable';
@@ -254,15 +259,16 @@ function contractMonitor(state,ui) {
   const recent = permitted ? previousWindows(feed.recent,now) : '';
   const closed = close !== null && close <= now;
   if (!market || closed || (start !== null && now < start)) {
-    const waiting = status === 'disabled' ? 'Public Kalshi quotes are off' : status === 'offline' ? 'Contract feed offline' :
-      status === 'disconnected' ? 'Live feed disconnected' : status === 'empty' ? 'Waiting for the next 15-minute contract' : 'Waiting for a current contract';
-    const message = status === 'disabled' ? 'Enable public Kalshi market data in Worker settings to follow the 15-minute Bitcoin market.' :
+    const waiting = status === 'disabled' ? `Public ${spec.name} quotes are off` : status === 'offline' ? 'Contract feed offline' :
+      status === 'restricted' ? `${spec.name} public feed is restricted` :
+      status === 'disconnected' ? 'Live feed disconnected' : status === 'empty' ? `Waiting for the next ${spec.minutes}-minute contract` : 'Waiting for a current contract';
+    const message = status === 'disabled' ? (venue==='kalshi' ? 'Enable public Kalshi market data for Bitcoin and Central Park weather. The weather worker will apply its saved paper trading setting.' : 'Polymarket US public data supplies the five-minute and hourly Bitcoin markets.') :
       status === 'offline' ? 'The online worker collects public Bitcoin prediction market quotes.' :
       status === 'disconnected' ? 'Reconnect to the worker to receive the current Bitcoin contract.' :
       closed ? 'The previous contract has closed. The next published market will appear after a venue check.' :
-      feed.message || 'The worker will show the current Kalshi contract when it receives a public market response.';
-    return `${band}<div class="btc-workspace"><section class="panel btc-contract-empty"><h2>${esc(waiting)}</h2><p>${esc(message)}</p>
-      ${status === 'disabled' ? button('Market data settings','kalshi-settings',{kind:'secondary',symbol:'control'}) : ''}</section>${recent}</div>`;
+      feed.message || `The worker will show the current ${spec.name} contract when it receives a public market response.`;
+    return `${band}<div class="btc-workspace"><div class="btc-market-trade"><section class="panel btc-contract-empty"><h2>${esc(waiting)}</h2><p>${esc(message)}</p>
+      ${status === 'disabled' ? button('Enable '+spec.name+' data',venue==='kalshi'?'btc-kalshi-feed':'btc-poly-feed',{value:'true',kind:'primary',disabled:ui.locked})+' '+button('Market data settings',venue==='kalshi'?'kalshi-settings':'btc-settings',{kind:'secondary',symbol:'control'}) : ''}</section>${orderTicket(state,ui,venue)}</div>${recent}</div>`;
   }
   const points = contractHistory(market,now), latest = points.at(-1), prior = points.at(-2);
   const current = contractPrices(posted ? market : null);
@@ -277,13 +283,13 @@ function contractMonitor(state,ui) {
   const remaining = close === null ? dash : `<time datetime="${new Date(close).toISOString()}" data-btc-countdown="${esc(market.close_at)}" aria-live="off">${bitcoinCountdown(close,now)}</time>`;
   const reason = status === 'stale' && status !== feed.status ? 'The last book receipt is outside the freshness window.' : feed.message;
   const detail = ['partial','stale','rate_limited','error'].includes(status) && reason ? `<p class="btc-contract-warning">${esc(reason)}</p>` : '';
-  return `${band}<div class="btc-workspace"><section class="panel btc-current" aria-labelledby="btc-current-title">
+  return `${band}<div class="btc-workspace"><div class="btc-market-trade has-book"><section class="panel btc-current" aria-labelledby="btc-current-title">
     <div class="panel-head"><div><h2 id="btc-current-title">${esc(title)}</h2><p>${esc(market.id)}${start !== null && close !== null ? ` · ${esc(timeBounds(start,close))}` : ''}</p></div>
-    ${market.market_url ? `<div class="small-note">${sourceLink('Kalshi market',market.market_url)}</div>` : ''}</div>
+    ${market.market_url ? `<div class="small-note">${sourceLink(spec.name+' market',market.market_url)}</div>` : ''}</div>
     <div class="btc-odds-strip">${oddsSide('yes',current,change('yes'),market)}${oddsSide('no',current,change('no'),market)}
     <div class="btc-time-left"><span>Time to expiry</span><strong>${remaining}</strong><small>Closes ${esc(shortTime(close))}</small></div></div>
-    <p class="btc-receipt-line">${received === null ? 'Awaiting this contract’s first book receipt.' : `Book received ${esc(stamp(received))}.`}${market.http_date ? ` Venue response ${esc(shortTime(market.http_date))}.` : ''}</p>${detail}</section>
-    <div class="btc-grid">${oddsChart(market,points,interval)}${contractTerms(market)}</div>${recent}</div>`;
+    <p class="btc-receipt-line">${received === null ? 'Awaiting this contract’s first book receipt.' : `Book received ${esc(stamp(received))}.`}${market.source_at && venue!=='kalshi' ? ` Venue book ${esc(shortTime(market.source_at))}.` : market.http_date ? ` Venue response ${esc(shortTime(market.http_date))}.` : ''}</p>${detail}</section>
+    ${orderTicket(state,ui,venue)}${oddsChart(market,points,interval,venue)}${contractTerms(market,venue)}</div>${recent}</div>`;
 }
 function bitcoinSpot(state,ui) {
   const m=state.bitcoin || {}, linked=ui.connected === true;
@@ -293,17 +299,20 @@ function bitcoinSpot(state,ui) {
   const status=!linked ? 'Worker disconnected' : !known ? 'Waiting for the Bitcoin worker' : m.online === false ? 'Worker offline' : !m.enabled ? 'BTC collection is off. Enable collection to start the paper trial.' : m.status || 'Awaiting data';
   const body = `<div class="feed-band"><div><i class="state-symbol ${linked && m.enabled && m.quote?.fresh ? 'connected' : ''}" aria-hidden="true"></i><strong>${esc(status)}</strong></div>
     <div class="scan-time">${icon('clock',15)}${m.last_checked_at ? `Last checked ${esc(stamp(m.last_checked_at))}` : 'Awaiting the first Bitstamp check'}</div></div>
-    <div class="btc-workspace"><div class="btc-grid">${bitcoinHistory(m,ui)}<div class="btc-sections">${bitcoinAccount(m)}${bitcoinSignal(m)}</div></div>${bitcoinActivity(m)}</div>`;
+    <div class="btc-workspace"><div class="btc-grid">${bitcoinHistory(m,ui)}<div class="btc-sections">${orderTicket(state,ui,'spot')}${bitcoinAccount(m)}${bitcoinSignal(m)}</div></div>${bitcoinActivity(m)}</div>`;
   return {body,controls};
 }
 export function bitcoinView(state,ui) {
-  const panels = [['contracts','15-minute markets'],['spot','Spot strategy']];
-  const active = ui.btcPanel === 'spot' ? 'spot' : 'contracts';
+  const panels = [...bitcoinPanels];
+  const active = bitcoinPanels.has(ui.btcPanel) ? ui.btcPanel : 'contracts';
   const spot = active === 'spot' ? bitcoinSpot(state,ui) : null;
+  const venue=panelVenues[active], spec=venues[venue];
   const tabs = `<div class="btc-panel-tabs" role="tablist" aria-label="Bitcoin views">${panels.map(([key,label])=>
     `<button type="button" role="tab" id="btc-tab-${key}" data-action="btc-panel" data-value="${key}" aria-selected="${active===key}" aria-controls="btc-view-${key}" tabindex="${active===key ? 0 : -1}">${label}</button>`).join('')}</div>`;
-  const body = spot ? spot.body : contractMonitor(state,ui);
-  return `${headline('Bitcoin',spot ? 'BTC / USD <span class="context-divider">/</span> Spot paper trading' : 'Kalshi <span class="context-divider">/</span> 15-minute prediction markets',spot?.controls)}${tabs}
+  const body = spot ? spot.body : contractMonitor(state,ui,venue);
+  let controls=spot?.controls || (brokerFor(state,venue) ? contractAuto(state,ui,venue):'');
+  if (spot || brokerFor(state,venue)) controls+=button('Paper order','btc-ticket-jump',{value:spot?'spot':venue,kind:'secondary',extraClass:'btc-jump'});
+  return `${headline('Bitcoin markets',spot ? 'BTC / USD <span class="context-divider">/</span> Spot paper trading' : `${spec.name} <span class="context-divider">/</span> ${spec.minutes}-minute prediction markets`,controls)}${tabs}
     ${panels.map(([key])=>`<div id="btc-view-${key}" role="tabpanel" aria-labelledby="btc-tab-${key}"${active===key ? ' tabindex="0"' : ' hidden'}>${active===key ? body : ''}</div>`).join('')}`;
 }
 export function optionsView() {

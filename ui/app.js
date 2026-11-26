@@ -2,7 +2,9 @@ import {button, connectionUrl, emptyBox, esc, headline, icon, reloadDisplayTimeZ
 import {detailTabs, researchView} from './research.js';
 import {defaultQuoteRange, marketsView, paperSwitch, quoteRanges, quoteRows} from './markets.js';
 import {activityView, connectionForm, modeLabel, portfolioView, workerView} from './views.js';
-import {bitcoinCountdown, bitcoinRanges, bitcoinView, comparisonView, optionsView} from './bitcoin.js';
+import {bitcoinCountdown, bitcoinPanels, bitcoinRanges, bitcoinView, comparisonView, optionsView} from './bitcoin.js';
+import {bitcoinAccountView} from './bitcoin-account.js';
+import {createOrderId, defaultTicketLimit, loadPendingOrders, makeOrder, riskPayload, savePendingOrders, ticketDraft, ticketFeedback, updateTicket, venues} from './bitcoin-trading.js';
 import {isUtcDisplay, utcClock} from './time.js';
 
 const links = ['Markets', 'Research', 'Portfolio', 'Activity', 'Worker'];
@@ -16,7 +18,10 @@ function savePreference(key,value) { try { localStorage.setItem(key,value); } ca
 const lastDesk = preference('pmb.tradingWorkspace');
 const ui = {
   desk:Object.hasOwn(desks,lastDesk) ? lastDesk : 'weather', comparing:preference('pmb.topView') === 'compare',
-  btcPanel:preference('pmb.bitcoinPanel') === 'spot' ? 'spot' : 'contracts', activityHours:24, btcRange:1440,
+  btcView:links.includes(preference('pmb.bitcoinView')) ? preference('pmb.bitcoinView') : 'Markets',
+  btcPanel:bitcoinPanels.has(preference('pmb.bitcoinPanel')) ? preference('pmb.bitcoinPanel') : 'contracts',
+  btcDrafts:new Map(), btcMessages:new Map(), btcPendingOrders:loadPendingOrders(), btcActivityFilter:'all', btcRiskDraft:{},
+  activityHours:24, btcRange:1440,
   view:'Research', selected:null, filter:'All decisions', tab:'Decision', mobileDetail:false,
   quoteSelected:null, quoteMobileDetail:false, quoteRange:defaultQuoteRange, paperSwitchPending:false,
   activityFilter:'All events', provider:null, connectionError:'', busy:false,
@@ -65,6 +70,9 @@ function readToken() {
     history.replaceState(null,'',url.pathname + url.search);
     if (secureWorker(url) && supplied) {
       token = supplied;
+      try {
+        if (sessionStorage.getItem('pmb.worker.token')!==supplied) { ui.btcPendingOrders.clear();savePendingOrders(ui.btcPendingOrders); }
+      } catch {}
       try { sessionStorage.setItem('pmb.worker.token', token); } catch { }
       return;
     }
@@ -170,6 +178,9 @@ function notices() {
   const visibleState = ui.comparing ? compareState : ui.desk === 'weather' ? state : ui.desk === 'bitcoin' ? bitcoinState : null;
   if (ui.contactError) messages.push(`<div class="notice error" data-key="connection" role="alert">${icon('warn',18)}<span>${esc(ui.contactError)}${visibleState ? ' Showing the last received snapshot.' : ''}</span>${button('Retry connection','retry',{kind:'inline'})}</div>`);
   if (ui.actionError) messages.push(`<div class="notice error" data-key="action" role="alert">${icon('warn',18)}<span>${esc(ui.actionError)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
+  if (!ui.busy && ui.desk==='bitcoin' && !ui.comparing) for(const venue of ui.btcPendingOrders.keys()) {
+    messages.push(`<div class="notice warn" data-key="btc-pending-${venue}" role="status"><span>${venue==='spot'?'Bitstamp spot':venues[venue].label} has a paper order awaiting a receipt. Retrying uses the original request ID.</span>${button('Retry same paper order','btc-retry-order',{value:venue,kind:'inline',disabled:!ui.connected})}</div>`);
+  }
   if (!ui.comparing && ui.desk === 'weather' && state?.paused) messages.push(`<div class="notice warn" data-key="pause">${icon('pause',16)}<span><strong>Paper entries paused.</strong> ${esc(state.risk_pause_reason || 'Existing paper positions remain in the portfolio.')}</span></div>`);
   if (ui.success) messages.push(`<div class="notice success" data-key="success" role="status">${icon('check',16)}<span>${esc(ui.success)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
   return messages.join('');
@@ -182,16 +193,18 @@ function render() {
   const weather = ui.desk === 'weather';
   el('strategy-desk').value = ui.desk;
   const navItem = (title,action,value,glyph,active) => `<button type="button" data-action="${action}" data-value="${value}" data-key="nav-${value}"${active ? ' aria-current="page"' : ''}>${icon(glyph,17)}<span>${title}</span></button>`;
-  const navigation = weather ? links.map(name => navItem(name,'view',name,name.toLowerCase(),!ui.comparing && name === ui.view)) :
-    [navItem(desks[ui.desk],'workspace',ui.desk,'markets',!ui.comparing)];
+  const navigation = ui.desk === 'options' ? [navItem(desks.options,'workspace','options','markets',!ui.comparing)] :
+    links.map(name => navItem(name,weather ? 'view' : 'btc-view',name,name.toLowerCase(),!ui.comparing && name === (weather ? ui.view : ui.btcView)));
   navigation.push(navItem('Compare','compare','compare','layers',ui.comparing));
   paint('navigation',navigation.join(''));
-  document.title = `${ui.comparing ? 'Compare' : weather ? titles[ui.view] : desks[ui.desk]} · Prediction Market Bot`;
+  document.title = `${ui.comparing ? 'Compare' : weather ? titles[ui.view] : ui.desk === 'bitcoin' ? 'Bitcoin '+ui.btcView : desks.options} · Prediction Market Bot`;
   paint('notices',notices());
   let html;
   if (ui.comparing && compareState) html = comparisonView(compareState,ui);
   else if (!ui.comparing && ui.desk === 'options') html = optionsView(null,ui);
-  else if (!ui.comparing && ui.desk === 'bitcoin' && bitcoinState) html = bitcoinView(bitcoinState,ui);
+  else if (!ui.comparing && ui.desk === 'bitcoin' && bitcoinState) {
+    html = ui.btcView === 'Markets' ? bitcoinView(bitcoinState,ui) : bitcoinAccountView(bitcoinState,ui);
+  }
   else if (ui.comparing || !weather || !state) {
     const label = ui.comparing ? 'Compare' : !weather ? desks[ui.desk] : ui.contactError ? 'Connect to a research worker' : 'Connecting to the research worker';
     const switchControl = !ui.comparing && weather && ['Markets','Research'].includes(ui.view) ? paperSwitch(null,ui) : '';
@@ -233,7 +246,7 @@ async function api(path, options = {}) {
     const body = await response.json().catch(() => null);
     if (!response.ok) {
       const message = typeof body?.error === 'string' ? body.error.slice(0,300) : `Worker returned HTTP ${response.status}.`;
-      throw new Error(message);
+      const error=new Error(message);error.httpStatus=response.status;throw error;
     }
     if (body === null) throw new Error('The worker response could not be read.');
     return body;
@@ -282,6 +295,8 @@ async function refresh(force = false) {
 }
 const confirmations = {
   'btc-feed':'Bitcoin market data preference saved.', 'btc-auto':'Bitcoin paper trading preference saved.',
+  'btc-poly-feed':'Polymarket US public data preference saved.', 'btc-contract-auto':'Paper automation preference saved for this account.',
+  'btc-contract-limits':'Paper risk limits saved for this account.',
   scan:'Forward scan requested.', replay:'Offline replay processed.', pause:'Paper entries paused.', resume:'Manual pause cleared.',
   mode:'Operating mode updated.', permission:'Market data permission updated.', research:'Research requested. New notes appear in Evidence.',
   configure_research:'Analyst settings saved.', research_auto:'Automatic research preference updated.',
@@ -323,6 +338,31 @@ async function action(name, value) {
   } finally { ui.busy = false;ui.scanSubmitting = false;pendingToggle = null;render(); }
   return accepted;
 }
+async function submitPaperOrder(order) {
+  if (ui.locked || !order) return;
+  const venue=order.action==='btc-spot-order'?'spot':order.value.venue, pending=ui.btcPendingOrders.get(venue);
+  if (pending && pending.value.client_id!==order.value.client_id) return;
+  ++requestVersion;pendingRead?.abort();pendingRead=null;ui.busy=true;
+  ui.btcPendingOrders.set(venue,order);savePendingOrders(ui.btcPendingOrders);ui.success='';ui.actionError='';render();
+  try {
+    const result=await api('/api/action',{method:'POST',body:JSON.stringify({action:order.action,value:order.value})});
+    if (!result?.receipt || result.receipt.client_id!==order.value.client_id) throw new Error('The worker did not return the matching order receipt.');
+    const receipt=result.receipt, wasRejected=receipt.status==='rejected';
+    const msg=ticketFeedback(receipt,order.action==='btc-spot-order');
+    ui.btcMessages.set(order.key,{text:msg,error:wasRejected});
+    ticketDraft(ui,order.key).done=!wasRejected;
+    ui.btcPendingOrders.delete(venue);savePendingOrders(ui.btcPendingOrders);announce(msg);
+    if (wasRejected) ui.actionError=msg;else ui.success=msg;
+  } catch (error) {
+    const msg=failure(error);
+    if (error.httpStatus>=400 && error.httpStatus<500 && ![408,425,429].includes(error.httpStatus)) {
+      ui.btcPendingOrders.delete(venue);savePendingOrders(ui.btcPendingOrders);
+    }
+    ui.btcMessages.set(order.key,{text:msg,error:true});ui.actionError=msg;announce(msg);
+  } finally {
+    await refresh(true);ui.busy=false;render();
+  }
+}
 function navigate(view) {
   if (!links.includes(view)) return;
   const returning = ui.comparing || ui.desk !== 'weather';
@@ -348,9 +388,18 @@ function switchWorkspace(desk,compare=false) {
   window.scrollTo(0,0);void refresh(true);
 }
 function selectBitcoinPanel(value,focus=false) {
-  if (!['contracts','spot'].includes(value)) return;
+  if (!bitcoinPanels.has(value)) return;
   ui.btcPanel=value;savePreference('pmb.bitcoinPanel',value);render();tickClock();
   if (focus) document.querySelector(`[data-action="btc-panel"][data-value="${value}"]`)?.focus();
+}
+function bitcoinNavigate(view) {
+  if (!links.includes(view)) return;
+  const returning = ui.comparing || ui.desk !== 'bitcoin';
+  ui.comparing=false;ui.desk='bitcoin';ui.btcView=view;
+  savePreference('pmb.tradingWorkspace','bitcoin');savePreference('pmb.topView','desk');savePreference('pmb.bitcoinView',view);
+  ui.actionError='';ui.success='';render();window.scrollTo(0,0);
+  el('view-title')?.focus({preventScroll:true});
+  if (returning) void refresh(true);
 }
 function choose(id, open = true) {
   if (!state?.markets.some(m => m.id === id)) return;
@@ -423,12 +472,30 @@ document.addEventListener('click',event => {
   if (clickable.disabled) return;
   const {action:name,value} = clickable.dataset;
   if (name === 'view') navigate(value);
+  else if (name === 'btc-view') bitcoinNavigate(value);
   else if (name === 'compare') switchWorkspace(ui.desk,true);
   else if (name === 'workspace') switchWorkspace(value);
   else if (name === 'btc-panel') selectBitcoinPanel(value);
-  else if (name === 'kalshi-settings') navigate('Worker');
+  else if (name === 'btc-retry-order') void submitPaperOrder(ui.btcPendingOrders.get(value));
+  else if (name === 'btc-ticket-jump') {
+    const target=el('paper-order-'+value);
+    if (target) { target.focus({preventScroll:true});const header=document.querySelector('.topbar').getBoundingClientRect();window.scrollBy(0,target.getBoundingClientRect().top-header.height-12); }
+  }
+  else if (name === 'btc-use-price' || name==='btc-new-order') {
+    const form=clickable.closest('form[data-btc-ticket]');
+    if (!form || ui.locked || ui.btcPendingOrders.has(form.dataset.venue)) return;
+    const {btcTicket:key,venue}=form.dataset,d=ticketDraft(ui,key);
+    if (name==='btc-new-order') { d.done=false;ui.btcMessages.delete(key);ui.success='';ui.actionError=''; }
+    else {
+      const limit=defaultTicketLimit(bitcoinState,venue,d);
+      if (limit!==null) { updateTicket(ui,key,'limit',limit);form.elements.limit.value=limit; }
+    }
+    render();
+  }
+  else if (name === 'kalshi-settings' || name === 'btc-settings') bitcoinNavigate('Worker');
   else if (name === 'btc-range' && bitcoinRanges.has(Number(value))) { ui.btcRange = Number(value);render(); }
-  else if (['btc-feed','btc-auto'].includes(name) && ['true','false'].includes(value)) void action(name,value === 'true');
+  else if (['btc-feed','btc-auto','btc-kalshi-feed','btc-poly-feed'].includes(name) && ['true','false'].includes(value)) void action(name==='btc-kalshi-feed'?'permission':name,value === 'true');
+  else if (name==='btc-contract-auto' && Object.hasOwn(venues,clickable.dataset.venue) && ['true','false'].includes(value)) void action(name,{venue:clickable.dataset.venue,enabled:value==='true'});
   else if (name === 'activity-range' && [24,48,168].includes(Number(value))) {
     ui.activityHours = Number(value);render();void refresh(true);
   }
@@ -470,8 +537,24 @@ document.addEventListener('click',event => {
   else if (name === 'tab') showTab(value);
   else if (name !== 'mode' || value !== state?.mode) void action(name,value);
 });
+document.addEventListener('input',event=>{
+  const field=event.target,form=field.form;
+  if (form?.dataset.btcTicket && field.localName==='input' && field.type!=='checkbox' && field.dataset.ticketField) {
+    updateTicket(ui,form.dataset.btcTicket,field.name,field.value);
+  }
+  if (form?.dataset.btcRisk) {
+    const v=form.dataset.btcRisk;ui.btcRiskDraft[v]??={};ui.btcRiskDraft[v][field.name]=field.value;
+  }
+});
 document.addEventListener('change',event => {
   const field = event.target;
+  const form=field.form;
+  if (form?.dataset.btcTicket && (field.localName==='select'||field.type==='checkbox')) {
+    const key=form.dataset.btcTicket;
+    updateTicket(ui,key,field.name,field.type==='checkbox'?field.checked:field.value);render();
+    if (['action','side'].includes(field.name)) form.elements.limit.value=ticketDraft(ui,key).limit??'';
+    return;
+  }
   switch (field.id) {
     case 'strategy-desk':
       switchWorkspace(field.value);break;
@@ -481,6 +564,7 @@ document.addEventListener('change',event => {
       if (!rows().some(m => m.id === ui.selected)) { ui.selected = rows()[0]?.id ?? null;ui.tab = 'Decision'; }
       render(); break;
     case 'activity-filter': ui.activityFilter = field.value;render();break;
+    case 'btc-activity-filter': ui.btcActivityFilter=field.value;render();break;
     case 'display-zone':
       if (setDisplayTimeZone(field.value)) { tickClock(); render(); }
       break;
@@ -493,6 +577,24 @@ document.addEventListener('submit',async event => {
   event.preventDefault();
   const form = event.target;
   if (form.id === 'connection-form') { editConnection(form.elements.url.value);return; }
+  if (form.dataset.btcTicket) {
+    if (ui.locked || ui.btcPendingOrders.has(form.dataset.venue) || !bitcoinState) return;
+    const {btcTicket:key,venue,market}=form.dataset,d=ticketDraft(ui,key);
+    if (d.done) return;
+    try {
+      for (const field of form.elements) if (field.dataset?.ticketField) d[field.name]=field.type==='checkbox'?field.checked:field.value;
+      await submitPaperOrder(makeOrder(bitcoinState,ui,venue,market,d,createOrderId()));
+    } catch (error) { ui.btcMessages.set(key,{text:failure(error),error:true});render(); }
+    return;
+  }
+  if (form.dataset.btcRisk) {
+    if (ui.locked) return;
+    const venue=form.dataset.btcRisk;
+    try {
+      if (await action('btc-contract-limits',riskPayload(venue,new FormData(form)))) { delete ui.btcRiskDraft[venue];render(); }
+    } catch (error) {ui.actionError=failure(error);render();}
+    return;
+  }
   if (form.id !== 'provider-form' || ui.locked) return;
   const data = new FormData(form);
   const value = {provider:el('provider-picker').value,enabled:data.has('enabled'),model:String(data.get('model') || '').trim(),
@@ -507,8 +609,9 @@ document.addEventListener('keydown',event => {
   if (target.matches('[role="tab"]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
     event.preventDefault();
     if (target.dataset.action === 'btc-panel') {
-      const next = event.key === 'Home' ? 'contracts' : event.key === 'End' ? 'spot' : (ui.btcPanel === 'spot' ? 'contracts' : 'spot');
-      selectBitcoinPanel(next,true);
+      const panels=[...bitcoinPanels.keys()],idx=panels.indexOf(ui.btcPanel);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? panels.length-1 : (idx+(event.key==='ArrowRight' ? 1 : -1)+panels.length)%panels.length;
+      selectBitcoinPanel(panels[next],true);
       return;
     }
     const pos = detailTabs.indexOf(ui.tab);

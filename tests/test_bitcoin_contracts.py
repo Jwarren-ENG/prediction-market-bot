@@ -138,6 +138,7 @@ class BitcoinContractsTest(unittest.TestCase):
             {
                 "at": weather.iso(NOW),
                 "http_date": weather.iso(NOW - timedelta(seconds=1)),
+                "source_at": weather.iso(NOW - timedelta(seconds=1)),
                 "kind": "book",
                 "yes_bid_cents": 8.4,
                 "yes_ask_cents": 14,
