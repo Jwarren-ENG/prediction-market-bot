@@ -1,6 +1,6 @@
 # Third-party notices
 
-<!-- Cargo.lock and Python runtime inputs: 8cdb3e12326cb05e1d3fb8b729a18999861cfc590e76f8914a561bf7de31f3f6 -->
+<!-- Packaged dependency inputs: 5100c0f07ac5ab08c6eab342784b15b0b138838d1198983c99b8211d13efd849 -->
 
 The desktop packages include the notices below. The Apple and Windows builds share this index. Each source link identifies the upstream component. The Rust standard library notices for the compiler used to build the executable accompany this document in RUST-STANDARD-LIBRARY.html.
 
@@ -329,7 +329,7 @@ The Windows Python distribution also includes the Microsoft Visual C++ Runtime. 
 ```text
 Microsoft components in Prediction Market Bot for Windows
 
-The following terms apply to the indicated Microsoft components. The setup checkbox or the /ACCEPTCOMPONENTTERMS option records your agreement to these component terms.
+The following terms apply to the indicated Microsoft components. The setup checkbox or the /ACCEPTCOMPONENTTERMS option confirms your agreement to these component terms.
 
 The desktop web view includes Microsoft Defender SmartScreen. SmartScreen collects and sends information to Microsoft as described in the Microsoft Privacy Statement (https://aka.ms/privacy) and the Microsoft Edge Privacy Whitepaper (https://learn.microsoft.com/en-us/microsoft-edge/privacy-whitepaper#smartscreen). Microsoft's Evergreen Runtime may check for updates and download and install them automatically.
 

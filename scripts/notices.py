@@ -72,11 +72,14 @@ def inputs_stamp():
         PYTHON,
         RELEASE,
         ARCHIVES,
+        PYTHON_FULL,
+        SDK_VERSION,
+        MINGW_TAG,
     ]
     digest = sha256(
         json.dumps(data, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()
-    return f"<!-- Cargo.lock and Python runtime inputs: {digest} -->"
+    return f"<!-- Packaged dependency inputs: {digest} -->"
 
 
 def install(destination, stdlib_notice=None, windows=False):
@@ -468,7 +471,7 @@ def windows_terms(doc, cache):
             "Microsoft components in Prediction Market Bot for Windows",
             "",
             "The following terms apply to the indicated Microsoft components. The setup checkbox or the "
-            "/ACCEPTCOMPONENTTERMS option records your agreement to these component terms.",
+            "/ACCEPTCOMPONENTTERMS option confirms your agreement to these component terms.",
             "",
             "The desktop web view includes Microsoft Defender SmartScreen. SmartScreen collects and sends "
             "information to Microsoft as described in the Microsoft Privacy Statement (https://aka.ms/privacy) "
