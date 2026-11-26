@@ -2,11 +2,20 @@ import {button, connectionUrl, emptyBox, esc, headline, icon, reloadDisplayTimeZ
 import {detailTabs, researchView} from './research.js';
 import {defaultQuoteRange, marketsView, paperSwitch, quoteRanges, quoteRows} from './markets.js';
 import {activityView, connectionForm, modeLabel, portfolioView, workerView} from './views.js';
+import {bitcoinRanges, bitcoinView, optionsView} from './bitcoin.js';
 
 const links = ['Markets', 'Research', 'Portfolio', 'Activity', 'Worker'];
 const titles = {Markets:'Markets', Research:'Research inbox', Portfolio:'Portfolio', Activity:'Activity', Worker:'Worker'};
 const narrow = window.matchMedia('(max-width: 879px)');
+const desks = {weather:'Central Park weather', bitcoin:'Bitcoin', options:'Options'};
+function savedDesk() {
+  try {
+    const value = localStorage.getItem('pmb.tradingWorkspace');
+    return Object.hasOwn(desks,value) ? value : 'weather';
+  } catch { return 'weather'; }
+}
 const ui = {
+  desk:savedDesk(), activityHours:24, btcRange:1440,
   view:'Research', selected:null, filter:'All decisions', tab:'Decision', mobileDetail:false,
   quoteSelected:null, quoteMobileDetail:false, quoteRange:defaultQuoteRange, paperSwitchPending:false,
   activityFilter:'All events', provider:null, connectionError:'', busy:false,
@@ -141,7 +150,7 @@ function notices() {
   const messages = [];
   if (ui.contactError) messages.push(`<div class="notice error" data-key="connection" role="alert">${icon('warn',18)}<span>${esc(ui.contactError)}${state ? ' Showing the last received snapshot.' : ''}</span>${button('Retry connection','retry',{kind:'inline'})}</div>`);
   if (ui.actionError) messages.push(`<div class="notice error" data-key="action" role="alert">${icon('warn',18)}<span>${esc(ui.actionError)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
-  if (state?.paused) messages.push(`<div class="notice warn" data-key="pause">${icon('pause',16)}<span><strong>Paper entries paused.</strong> ${esc(state.risk_pause_reason || 'Existing paper positions remain in the portfolio.')}</span></div>`);
+  if (ui.desk === 'weather' && state?.paused) messages.push(`<div class="notice warn" data-key="pause">${icon('pause',16)}<span><strong>Paper entries paused.</strong> ${esc(state.risk_pause_reason || 'Existing paper positions remain in the portfolio.')}</span></div>`);
   if (ui.success) messages.push(`<div class="notice success" data-key="success" role="status">${icon('check',16)}<span>${esc(ui.success)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
   return messages.join('');
 }
@@ -150,15 +159,20 @@ function render() {
   ui.locked = ui.busy || !ui.connected;
   const late = state?.health?.heartbeat && Date.now() - new Date(state.health.heartbeat).getTime() > 180000;
   ui.healthTone = !ui.connected ? 'offline' : late ? 'late' : 'connected';
-  paint('navigation',links.map(name => `<button type="button" data-action="view" data-value="${name}" data-key="nav-${name}"${ui.view === name ? ' aria-current="page"' : ''}>${icon(name.toLowerCase(),17)}<span>${name}</span></button>`).join(''));
-  document.title = `${titles[ui.view]} · Prediction Market Bot`;
+  const weather = ui.desk === 'weather';
+  el('strategy-desk').value = ui.desk;
+  el('navigation').hidden = !weather;
+  paint('navigation',weather ? links.map(name => `<button type="button" data-action="view" data-value="${name}" data-key="nav-${name}"${ui.view === name ? ' aria-current="page"' : ''}>${icon(name.toLowerCase(),17)}<span>${name}</span></button>`).join('') : '');
+  document.title = `${weather ? titles[ui.view] : desks[ui.desk]} · Prediction Market Bot`;
   paint('notices',notices());
   let html;
-  if (!state) {
+  if (ui.desk === 'options') html = optionsView(state,ui);
+  else if (!state) {
     const label = ui.contactError ? 'Connect to a research worker' : 'Connecting to the research worker';
-    const switchControl = ['Markets','Research'].includes(ui.view) ? paperSwitch(null,ui) : '';
+    const switchControl = weather && ['Markets','Research'].includes(ui.view) ? paperSwitch(null,ui) : '';
     html = `${headline(label,'Private paper workspace',switchControl)}<div class="connection-panel panel"><div class="panel-body">${ui.contactError ? connectionForm(ui) : emptyBox('Waiting for a snapshot','The worker owns the research feed and the paper account.','worker')}</div></div>`;
-  } else if (ui.view === 'Markets') {
+  } else if (ui.desk === 'bitcoin') html = bitcoinView(state,ui);
+  else if (ui.view === 'Markets') {
     const rank = new Map(quoteOrder.map((id,i)=>[id,i]));
     const quotes = quoteRows(state,ui.connected).sort((a,b)=>rank.get(a.id)-rank.get(b.id));
     if (!quotes.some(m => m.id === ui.quoteSelected)) {
@@ -174,7 +188,7 @@ function render() {
   paint('workspace',html);
   const status = !state && !ui.contactError ? 'Connecting' : !ui.connected ? 'Worker disconnected' : late ? 'Heartbeat overdue' : 'Worker connected';
   paint('statusbar',`<div class="status-inner"><span class="connection-status"><i class="state-symbol ${ui.healthTone}" aria-hidden="true"></i>${status}</span>
-    ${state ? `<span class="footer-mode">${esc(modeLabel(state))}${state.paused ? ' · Entries paused' : ''}</span><span class="footer-heartbeat">Heartbeat <time>${esc(stamp(state.health.heartbeat))}</time></span>` : ''}</div>`);
+    ${state ? `<span class="footer-mode">${weather ? esc(modeLabel(state)) + (state.paused ? ' · Entries paused' : '') : ui.desk === 'bitcoin' ? 'Bitcoin paper' : 'Options · Coming soon'}</span><span class="footer-heartbeat">Heartbeat <time>${esc(stamp(state.health.heartbeat))}</time></span>` : ''}</div>`);
   if (previous && previous !== document.body && document.activeElement === document.body) {
     const fallback = previous.isConnected ? previous : ui.view === 'Markets' ? document.querySelector('.quote-link[aria-pressed="true"]') || el('view-title') :
       ui.view === 'Research' && el('decision-filter') ? el('decision-filter') : el('view-title');
@@ -217,7 +231,8 @@ async function refresh(force = false) {
   const controller = new AbortController();
   pendingRead = controller;
   try {
-    const next = await api('/api/state',{controller});
+    const query = ui.desk === 'bitcoin' ? '?workspace=bitcoin' : ui.desk === 'weather' && ui.view === 'Activity' ? `?activity_hours=${ui.activityHours}` : '';
+    const next = await api('/api/state'+query,{controller});
     if (version !== requestVersion) return false;
     selectData(next);
     ui.contactError = '';
@@ -231,6 +246,7 @@ async function refresh(force = false) {
   }
 }
 const confirmations = {
+  'btc-feed':'Bitcoin market data preference saved.', 'btc-auto':'Bitcoin paper trading preference saved.',
   scan:'Forward scan requested.', replay:'Offline replay processed.', pause:'Paper entries paused.', resume:'Manual pause cleared.',
   mode:'Operating mode updated.', permission:'Market data permission updated.', research:'Research requested. New notes appear in Evidence.',
   configure_research:'Analyst settings saved.', research_auto:'Automatic research preference updated.',
@@ -283,6 +299,7 @@ function navigate(view) {
   render();
   window.scrollTo(0,0);
   el('view-title')?.focus({preventScroll:true});
+  if (view === 'Activity') void refresh(true);
 }
 function choose(id, open = true) {
   if (!state?.markets.some(m => m.id === id)) return;
@@ -355,6 +372,11 @@ document.addEventListener('click',event => {
   if (clickable.disabled) return;
   const {action:name,value} = clickable.dataset;
   if (name === 'view') navigate(value);
+  else if (name === 'btc-range' && bitcoinRanges.has(Number(value))) { ui.btcRange = Number(value);render(); }
+  else if (['btc-feed','btc-auto'].includes(name) && ['true','false'].includes(value)) void action(name,value === 'true');
+  else if (name === 'activity-range' && [24,48,168].includes(Number(value))) {
+    ui.activityHours = Number(value);render();void refresh(true);
+  }
   else if (name === 'paper-switch') {
     const a = state?.paper_automation;
     if (!ui.connected || ui.locked || !a?.available || a.risk_pause_reason || typeof a.enabled !== 'boolean') return;
@@ -396,6 +418,12 @@ document.addEventListener('click',event => {
 document.addEventListener('change',event => {
   const field = event.target;
   switch (field.id) {
+    case 'strategy-desk':
+      if (!Object.hasOwn(desks,field.value)) break;
+      ui.desk = field.value;
+      try { localStorage.setItem('pmb.tradingWorkspace',ui.desk); } catch {}
+      ui.actionError = '';ui.success = '';
+      render();announce(`${desks[ui.desk]} workspace`);window.scrollTo(0,0);void refresh(true);break;
     case 'decision-filter':
       ui.filter = field.value;
       order = state.markets.map(m => m.id);

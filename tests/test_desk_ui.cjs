@@ -1,6 +1,22 @@
 const {test, before, afterEach} = require('node:test');
 const assert = require('node:assert/strict');
 
+test('daily activity collapses only matching decisions and retains contract receipts', async () => {
+  const {groupReceipts,receiptRows,historyPanel} = await import('../ui/activity-history.js');
+  const row = (id,kind,at,message) => ({id,kind,at,message,market_id:id});
+  const rows = [row('alpha','decision',1,'Watch. Needs history.'), row('beta','decision',1,'Watch. Needs history.'),
+    row('gamma','decision',2,'Watch. Needs history.'),row('fill','fill',1,'Bought 2')];
+  assert.deepEqual(groupReceipts(rows).map(g=>g.length),[2,1,1]);
+  const html = receiptRows(rows,new Map()).join('');
+  for (const id of ['alpha','beta','gamma','fill']) assert.ok(html.includes(id));
+  const result = historyPanel({hours:24,bin_seconds:3600,start_at:60000,end_at:86460000,
+    decisions:{counts:Array(24).fill(2)},scans:{counts:Array(24).fill(3)}},24);
+  assert.match(result,/48<\/strong>/);
+  assert.match(result,/72<\/strong>/);
+  assert.match(result,/View interval counts/);
+  assert.match(historyPanel(null,168),/Loading recorded activity/);
+});
+
 let time, scanButton, latestPriceMoves;
 before(async () => {
   time = await import('../ui/time.js');

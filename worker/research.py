@@ -89,6 +89,7 @@ def public_source(url):
             host == h or host.endswith("." + h)
             for h in (
                 "weather.gov",
+                "aviationweather.gov",
                 "noaa.gov",
                 "mesonet.agron.iastate.edu",
                 "noaa-nbm-grib2-pds.s3.amazonaws.com",

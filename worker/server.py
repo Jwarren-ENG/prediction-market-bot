@@ -18,6 +18,8 @@ from urllib.error import URLError
 from urllib.parse import urlsplit, unquote, parse_qs
 from urllib.request import Request, build_opener, ProxyHandler
 
+from . import monitoring
+from .bitcoin import BitcoinPaper, quote_fresh
 from .feeds import collect
 from .ledger import Ledger
 from .notifications import Notifications
@@ -56,6 +58,8 @@ class Desk:
         self.wake = threading.Event()
         self.online = online
         self.quotes = QuoteTape(self._quote_access, self.transition)
+        self.bitcoin = BitcoinPaper(directory, online=online)
+        self.next_pair = 0.0
         self.interval = interval
         self.started = utc()
         self.heartbeat = self.started
@@ -111,7 +115,7 @@ class Desk:
             "reason": reason,
         }
 
-    def state(self):
+    def state(self, *, activity_hours=None, bitcoin=False):
         mode = self.mode()
         output = self.ledgers[mode].state()
         saved = self.store.get("forward_health", {})
@@ -147,7 +151,7 @@ class Desk:
             )[:500]
         output.update(
             {
-                "version": "0.1.3",
+                "version": "0.2.0",
                 "mode": mode,
                 "paper_automation": self.paper_automation(),
                 "research": self.research.state(mode),
@@ -181,7 +185,52 @@ class Desk:
             }
         )
         output["quotes"] = self.quotes.state()
+        if activity_hours in monitoring.WINDOWS:
+            clock = output.get("clock") if mode == "replay" else utc()
+            end = int(instant(clock or utc()).timestamp()) + 1
+            start = end - activity_hours * 3600
+            stride = monitoring.WINDOWS[activity_hours]
+            with self.store.connection() as db:
+                scans = monitoring.counts(db, "scans", start, end, stride) if mode == "forward" else None
+            output["activity_history"] = {
+                "hours": activity_hours, "start_at": monitoring.stamp(start),
+                "end_at": monitoring.stamp(end), "bin_seconds": stride, "scans": scans,
+                "decisions": self.ledgers[mode].decision_counts(start, end, stride),
+            }
+        if bitcoin:
+            output["bitcoin"] = self.bitcoin.state()
+            with self.store.connection() as db:
+                output["comparison"] = monitoring.comparison(db)
         return output
+
+    def record_comparison(self):
+        """Take one common-time sample, using marks the two workers could observe."""
+        with self.transition:
+            if self._quote_access()[0] != "enabled":
+                return
+            btc = self.bitcoin.state()
+            if not btc.get("enabled") or not btc.get("started_at"):
+                return
+            at = utc()
+            now = instant(at)
+            active, hold = btc["portfolio"], btc["benchmark"]
+            quote = btc.get("quote") or {}
+            if not (hold["filled_orders"] and quote.get("fresh") and quote_fresh(quote, now)
+                    and active.get("mark_fresh") and hold.get("mark_fresh")):
+                return
+            weather = self.ledgers["forward"].portfolio_mark(now)
+            if not monitoring.comparable_weather(weather):
+                return
+            with self.store.connection() as db:
+                if not db.execute("SELECT 1 FROM paired_equity LIMIT 1").fetchone():
+                    start = instant(btc["started_at"])
+                    if 0 <= (now-start).total_seconds() <= 60:
+                        opening = self.ledgers["forward"].portfolio_mark(start, require_known_at=True)
+                        if monitoring.comparable_weather(opening):
+                            monitoring.record_pair(db, btc["started_at"], opening["equity_cents"],
+                                                   active["initial_cash_cents"], hold["initial_cash_cents"], opening=True)
+                            db.commit()
+                monitoring.record_pair(db, at, weather["equity_cents"], active["equity_cents"], hold["equity_cents"])
 
     def scan(self, *, scheduled=False):
         with self.transition:
@@ -385,6 +434,7 @@ class Desk:
 
     def schedule(self):
         quote_thread = None
+        bitcoin_thread = None
         if self.online:
             quote_thread = threading.Thread(
                 target=self.quotes.run,
@@ -393,9 +443,17 @@ class Desk:
                 daemon=True,
             )
             quote_thread.start()
+            bitcoin_thread = threading.Thread(target=self.bitcoin.run, args=(self.stop,), name="bitcoin-paper", daemon=True)
+            bitcoin_thread.start()
         try:
             while not self.stop.is_set():
                 self.heartbeat = utc()
+                if self.online and time.monotonic() >= self.next_pair:
+                    self.next_pair = time.monotonic() + 20
+                    try:
+                        self.record_comparison()
+                    except Exception:
+                        LOG.exception("Could not record a common portfolio mark")
                 if (
                     self.online
                     and time.monotonic() >= self.next_scan
@@ -408,11 +466,22 @@ class Desk:
             self.quotes.wake.set()
             if quote_thread:
                 quote_thread.join(timeout=1)
+            if bitcoin_thread:
+                bitcoin_thread.join(timeout=1)
 
     def action(self, action, value):
         with self.transition:
             mode = self.mode()
-            if action == "mode" and value in ("replay", "forward"):
+            if action in ("btc-feed", "btc-auto") and type(value) is bool:
+                if value and not self.online:
+                    raise ValueError("An online worker is required for the Bitcoin paper trial.")
+                if action == "btc-feed":
+                    self.bitcoin.configure(value)
+                else:
+                    self.bitcoin.set_auto(value)
+                self.next_pair = 0.0
+                self.wake.set()
+            elif action == "mode" and value in ("replay", "forward"):
                 self.store.put("mode", value)
             elif action in ("pause", "resume"):
                 paused = action == "pause"
@@ -540,7 +609,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.permitted(path.startswith("/api/")):
             return
         if path == "/healthz":
-            payload = {"service": "pmb-paper", "version": "0.1.3"}
+            payload = {"service": "pmb-paper", "version": "0.2.0"}
             nonce = parse_qs(urlsplit(self.path).query).get("challenge", [""])[0]
             if len(nonce) == 48 and all(c in "0123456789abcdef" for c in nonce):
                 payload.update(
@@ -558,8 +627,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/notifications/preview":
             return self.reply(200, self.server.desk.notifications.preview())
         if path == "/api/state":
+            params = parse_qs(urlsplit(self.path).query)
+            hours = params.get("activity_hours", [None])[0]
+            if hours is not None and hours not in {"24", "48", "168"}:
+                return self.reply(400, {"error": "Choose 24, 48 or 168 activity hours."})
             try:
-                return self.reply(200, self.server.desk.state())
+                return self.reply(200, self.server.desk.state(
+                    activity_hours=int(hours) if hours else None,
+                    bitcoin=params.get("workspace") == ["bitcoin"],
+                ))
             except Exception:
                 LOG.exception("Snapshot failed")
                 return self.reply(500, {"error": "Worker snapshot could not be read."})

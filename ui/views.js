@@ -1,4 +1,5 @@
 import {marketActivity} from './activity.js';
+import {historyPanel, receiptRows} from './activity-history.js';
 import {age, arr, button, count, dash, day, emptyBox, esc, field, headline, human, icon, instant, money, num, price, sideName, sourceLink, scanButton, displayTimeZone, timeZoneChoices, stamp, text, tone} from './common.js';
 import {recentEntries} from './research.js';
 
@@ -68,18 +69,25 @@ export function portfolioView(state) {
       ${eRows.length ? panel('Exposure by event',table(['Event','Charged exposure','Worst case loss'],eRows,'Exposure by event')) : ''}</div>`;
 }
 export function activityView(state, ui) {
-  const entries = recentEntries(state.activity);
+  const hours = ui.activityHours || 24;
+  const history = state.activity_history;
+  const valid = history?.hours === hours;
+  const begin = valid ? instant(history.start_at)?.getTime() : null;
+  const end = valid ? instant(history.end_at)?.getTime() : null;
+  const entries = recentEntries(state.activity).filter(e => {
+    const at = instant(e.at)?.getTime();
+    return valid && at >= begin && at < end;
+  });
   const markets = new Map(arr(state.markets).map(m => [m.id,m]));
   const kinds = [...new Set(entries.map(r => r.kind).filter(Boolean))];
   const shown = entries.filter(r => ui.activityFilter === 'All events' || r.kind === ui.activityFilter);
   const select = `<div class="filter">${icon('filter',15)}<select id="activity-filter" aria-label="Filter activity by event type">${['All events',...kinds].map(k =>
     `<option value="${esc(k)}"${k === ui.activityFilter ? ' selected' : ''}>${k === 'All events' ? k : esc(human(k))}</option>`).join('')}</select></div>`;
   return `${headline('Activity', `${esc(modeLabel(state))} <span class="context-divider">/</span> Worker and ledger history`,state.mode === 'forward' ? scanButton(state,ui) : '')}
-    ${marketActivity(state,ui)}
-    ${panel('Event log',shown.length ? table(['Time','Event','Details'],shown.map(e =>
-      `<tr data-key="${esc(e.id ?? e.at)}"><td class="time-cell numeric">${esc(stamp(e.at))}</td>
-      <td>${esc(human(e.kind) || 'Worker event')}${e.market_id ? `<div class="row-meta">${esc(markets.get(e.market_id)?.label || e.market_id)}</div>` : ''}</td><td>${esc(e.message || dash)}</td></tr>`),'Worker event history') :
-      emptyBox('No matching events', 'The worker records its decisions, fills and settlements here.', 'activity'),select)}`;
+    ${historyPanel(history,hours)}${marketActivity(state,ui)}
+    ${panel('Event log',shown.length ? table(['Time','Event','Details'],receiptRows(shown,markets),'Worker event history') +
+        `<p class="activity-caption">Showing ${count(shown.length)} matching receipts from the latest worker records.</p>` :
+      emptyBox(valid ? 'No matching events' : 'Loading receipts', valid ? 'The selected range and filter have no matching recent records.' : 'Reading the selected window.', 'activity'),select)}`;
 }
 function modeControls(state,ui) {
   const replay = state.mode === 'replay';

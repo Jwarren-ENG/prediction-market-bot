@@ -60,6 +60,24 @@ class DesktopServiceTest(unittest.TestCase):
         self.assertGreater(len(state["markets"]), 0)
         self.assertEqual(state["research"]["configured"], [])
 
+    def test_workspace_reads_preserve_the_mode_and_have_separate_paper_balances(self):
+        mode = self.desk.mode()
+        status, raw = self.api("/api/state?workspace=bitcoin")
+        self.assertEqual(status, 200)
+        state = json.loads(raw)
+        self.assertEqual(state["bitcoin"]["portfolio"]["initial_cash_cents"], 1000000)
+        self.assertFalse(state["bitcoin"]["enabled"])
+        self.assertIsNone(state["comparison"]["start_at"])
+        self.assertEqual(self.desk.mode(), mode)
+        for hours, length in ((24,24), (48,24), (168,28)):
+            status, raw = self.api(f"/api/state?activity_hours={hours}")
+            self.assertEqual(status, 200)
+            history = json.loads(raw)["activity_history"]
+            self.assertEqual(len(history["decisions"]["counts"]), length)
+            self.assertEqual(history["hours"], hours)
+        self.assertEqual(self.api("/api/state?activity_hours=22")[0], 400)
+        self.assertEqual(self.api("/api/state?workspace=bitcoin", private=False)[0], 401)
+
     def test_origin_content_type_and_host_validation(self):
         host, port = self.server.server_address
         for origin, expected in ((f"http://{host}:{port}", 200), ("null", 403)):

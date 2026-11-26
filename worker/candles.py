@@ -1,4 +1,4 @@
-"""Venue-reported completed minute closes for a four-hour display window."""
+"""Bounded windows of venue-reported YES bid and ask closes."""
 
 from __future__ import annotations
 
@@ -9,17 +9,27 @@ from urllib.parse import urlencode
 
 from . import feeds, weather
 
-PERIOD = 60
-MINUTES = 240
-SPAN = PERIOD * MINUTES
 SOURCE = feeds.API + "/markets/candlesticks"
 MAX_PERIODS = 10_000
 MISSING_RETRY = 5 * 60
-OVERLAP = 2 * PERIOD
 
 
-def end_minute(now: datetime) -> int:
-    return int(now.timestamp()) // PERIOD * PERIOD
+@dataclass(frozen=True)
+class Window:
+    period: int  # Seconds per venue candle, measured at the UTC period end.
+    periods: int
+    label: str
+
+    @property
+    def span(self):
+        return self.period * self.periods
+
+    def completed_at(self, now: datetime) -> int:
+        return int(now.timestamp()) // self.period * self.period
+
+
+MINUTE = Window(60, 4 * 60, "one-minute")
+HOURLY = Window(3600, 7 * 24, "hourly")
 
 
 def _close(candle, name):
@@ -61,6 +71,7 @@ class Request:
     tickers: tuple
     start: int
     end: int
+    window: Window = MINUTE
 
     def url(self):
         return (
@@ -71,7 +82,7 @@ class Request:
                     "market_tickers": ",".join(self.tickers),
                     "start_ts": self.start,
                     "end_ts": self.end,
-                    "period_interval": 1,
+                    "period_interval": self.window.period // 60,
                 }
             )
         )
@@ -98,7 +109,7 @@ def parse(payload, request, openings):
             continue
         seen.add(ticker)
         raw = group.get("candlesticks")
-        if not isinstance(raw, list) or len(raw) > MINUTES + 2:
+        if not isinstance(raw, list) or len(raw) > request.window.periods + 2:
             issues.add(ticker)
             continue
         values = {}
@@ -110,7 +121,7 @@ def parse(payload, request, openings):
             stamp = item["end_period_ts"]
             if stamp <= request.start or stamp <= openings[ticker]:
                 continue
-            if stamp > request.end or stamp % PERIOD:
+            if stamp > request.end or stamp % request.window.period:
                 issues.add(ticker)
                 continue
             bid, bad_bid = _close(item, "yes_bid")
@@ -133,7 +144,11 @@ def parse(payload, request, openings):
 
 
 class Archive:
-    def __init__(self):
+    def __init__(self, window=MINUTE):
+        self.window = window
+        self.clear()
+
+    def clear(self):
         self.series = {}
         self.status = "waiting"
         self.message = "Waiting for an active public Kalshi catalog."
@@ -148,14 +163,16 @@ class Archive:
                 continue
             points = self.series[ticker].points
             for stamp in list(points):
-                if not end - SPAN < stamp <= end:
+                if not end - self.window.span < stamp <= end:
                     del points[stamp]
 
-    def plan(self, tickers, end, mono):
+    def plan(self, tickers, end, mono, *, openings=None):
         groups = {"full": [], "recent": []}
-        cutoff = end - SPAN
+        cutoff = end - self.window.span
         incremental = end
         for ticker in sorted(tickers):
+            if openings is not None and openings[ticker] >= end:
+                continue  # This listing has no completed venue period yet.
             series = self.series.setdefault(ticker, Series())
             if series.retry_full and mono < series.repair_after:
                 continue
@@ -167,7 +184,9 @@ class Archive:
             ):
                 groups["full"].append(ticker)
             elif series.through < end:
-                incremental = min(incremental, max(cutoff, series.through - OVERLAP))
+                incremental = min(
+                    incremental, max(cutoff, series.through - 2 * self.window.period)
+                )
                 groups["recent"].append(ticker)
         calls = []
         for name, start in (("full", cutoff), ("recent", incremental)):
@@ -175,10 +194,12 @@ class Archive:
             if not ids:
                 continue
             # Kalshi can include candles at both query boundaries.
-            periods = 1 + (end - start) // PERIOD
+            periods = 1 + (end - start) // self.window.period
             batch = min(100, MAX_PERIODS // periods)
             for i in range(0, len(ids), batch):
-                calls.append(Request(tuple(ids[i : i + batch]), start, end))
+                calls.append(
+                    Request(tuple(ids[i : i + batch]), start, end, self.window)
+                )
         return calls
 
     def merge(self, request, data, issues, active, mono):
@@ -188,7 +209,7 @@ class Archive:
             series = self.series.setdefault(ticker, Series())
             if ticker in data:
                 # A successful venue response is authoritative for its requested
-                # interval. A minute not returned in it stays a gap.
+                # interval. A period absent from the response stays a gap.
                 series.points = {
                     t: v
                     for t, v in series.points.items()

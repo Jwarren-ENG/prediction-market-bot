@@ -16,7 +16,7 @@ else:
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = "Prediction Market Bot"
-VERSION = "0.1.3"
+VERSION = "0.2.0"
 
 
 def payload(target, runtime, stdlib_notice, windows=False):
@@ -71,7 +71,7 @@ def mac(args, temp, output):
                 CFBundlePackageType="APPL",
                 CFBundleIconFile="AppIcon",
                 CFBundleShortVersionString=VERSION,
-                CFBundleVersion="4",
+                CFBundleVersion="5",
                 LSMinimumSystemVersion="12.0",
                 NSHighResolutionCapable=True,
                 NSPrincipalClass="NSApplication",

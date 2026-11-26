@@ -1,10 +1,11 @@
 const {before, test} = require('node:test');
 const assert = require('node:assert/strict');
 
-let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone;
+let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone, bitcoinWindow, bitcoinView, optionsView;
 before(async () => {
   ({quoteRows, quoteWindow, marketsView, paperSwitch} = await import('../ui/markets.js'));
   ({setDisplayTimeZone} = await import('../ui/common.js'));
+  ({bitcoinWindow,bitcoinView,optionsView} = await import('../ui/bitcoin.js'));
   setDisplayTimeZone('UTC');
 });
 
@@ -193,4 +194,100 @@ test('changing display zone shifts market chart labels without moving captured i
     assert.match(eastern,/datetime="2026-11-26T11:00:00.000Z"/);
     assert.doesNotMatch(eastern,/Time \(UTC\)/);
   } finally {setDisplayTimeZone('UTC');}
+});
+
+test('day, two-day and week windows use the same capture and bounded hour closes', () => {
+  const state=snapshot([point(-15,50,54),point(0,50,54)],{hourly_candles:[
+    point(-8*86400,1,90),point(-4*86400,7,11),point(-36*3600,15,19),point(-12*3600,28,32),point(3600,1,2),
+  ]});
+  const [row]=quoteRows(state,true);
+  for (const [minutes,hours,low] of [[1440,1,28],[2880,2,15],[10080,3,7]]) {
+    const w=quoteWindow(row,state.quotes,minutes);
+    assert.equal(w.end,base);
+    assert.equal(w.start,base-minutes*60000);
+    assert.equal(w.observed.filter(p=>p.source==='hour').length,hours);
+    assert.deepEqual(w.bid,{low,high:50,count:hours+2});
+    const html=screen(state,{quoteRange:minutes});
+    assert.match(html,new RegExp(`data-value="${minutes}" aria-pressed="true"`));
+    assert.match(html,/Kalshi hourly close/);
+    assert.match(html,/<time class="first"[^>]*><span>Nov /);
+  }
+  assert.equal(quoteWindow(row,state.quotes,240).observed.filter(p=>p.source==='hour').length,0);
+  assert.equal(row.bidChange,0);
+});
+
+test('source gaps and one-sided coincident observations stay separate', () => {
+  const state=snapshot([point(0,35,null)],{candles:[point(-3600,22,24),point(0,35,37)],
+    hourly_candles:[point(-7*3600,10,15),point(-6*3600,11,16),point(-4*3600,17,null),point(-3600,19,27),point(0,28,90)]});
+  const [row]=quoteRows(state,true), w=quoteWindow(row,state.quotes,1440);
+  assert.deepEqual(w.points.filter(p=>p.at===base).map(p=>[p.source,p.bid,p.ask]),[['minute',null,37],['poll',35,null]]);
+  assert.equal(w.ask.high,37);
+  const html=screen(state,{quoteRange:1440});
+  assert.equal((html.match(/class="quote-line bid" data-source="hour"/g)||[]).length,1);
+  assert.equal((html.match(/class="quote-point bid" data-source="hour"/g)||[]).length,1);
+  assert.equal(row.ask,null);
+});
+
+test('new listings retain the full selected domain and discard pre-listing observations', () => {
+  const state=snapshot([point(0,null,27)],{open_at:at(-7200),hourly_candles:[point(-4*86400,5,17),point(-3600,22,null)]});
+  state.quotes.history_status='ready';
+  state.quotes.hourly_history_status='partial';
+  const [row]=quoteRows(state,true), w=quoteWindow(row,state.quotes,10080);
+  assert.equal(w.start,base-7*86400*1000);
+  assert.equal(w.observed.length,2);
+  const html=screen(state,{quoteRange:10080});
+  assert.match(html,/class="chart-before-listing"/);
+  assert.match(html,/Listed Nov 26, 2026 · 13:00:00 UTC/);
+  assert.match(html,/Some Kalshi hourly history is unavailable/);
+  assert.doesNotMatch(screen(state),/Some Kalshi hourly/);
+  delete state.quotes.markets[0].open_at;
+  assert.doesNotMatch(screen(state,{quoteRange:10080}),/Before listing/);
+});
+
+test('Bitcoin chart uses only completed hourly spot closes, honors each window and leaves missing hours open', () => {
+  const candle=(hours,price)=>({at:at(hours*3600),close_usd:price});
+  const market={enabled:true,auto_enabled:false,online:true,status:'Ready',last_checked_at:at(60),hourly:[
+    candle(-170,1),candle(-89,'92000.10'),candle(-40,'90000'),candle(-10,'93500'),
+    candle(-9,'93900'),candle(-7,'94400'),candle(-6,null),candle(-5,'93500'),candle(-4,'93600'),candle(1,'99999'),
+    {at:at(-601),close_usd:'1'}]};
+  for (const [minutes,expected] of [[1440,5],[2880,6],[10080,7]]) {
+    const w=bitcoinWindow(market,minutes);
+    assert.equal(w.end,base+60000);
+    assert.equal(w.end-w.start,minutes*60000);
+    assert.equal(w.observed.length,expected);
+    assert.ok(w.observed.every(p=>p.close>=90000 && p.close<99999));
+  }
+  const html=bitcoinView({bitcoin:market},{connected:true,locked:false,btcRange:1440});
+  assert.equal((html.match(/class="quote-line bid"/g)||[]).length,2);
+  assert.equal((html.match(/class="quote-point bid"/g)||[]).length,1);
+  assert.match(html,/5 completed hourly closes/);
+  assert.match(html,/Bitstamp/);
+  assert.doesNotMatch(html,/99999|Coinbase/);
+  assert.match(html,/Awaiting first quote/);
+});
+
+test('Bitcoin controls, stale quote and comparison use their own authoritative accounts', () => {
+  const market={enabled:true,auto_enabled:false,online:true,status:'Delayed',last_checked_at:at(0),
+    quote:{fresh:false,bid_usd:'95813.12',ask_usd:'95814.89',source_at:at(-600)},portfolio:{equity_cents:1000000,btc:'0.05000000'},
+    benchmark:{equity_cents:1001000,btc:'0.005'},activity:[{at:at(-30),message:'Paper fill <checked>'}]};
+  const account={start_cents:1000000,end_cents:1001000,net_cents:1000,return_pct:.1,drawdown_cents:225};
+  const ui={connected:true,locked:false,btcRange:1440};
+  const snapshot={mode:'replay',paper_automation:{enabled:true},bitcoin:market,comparison:{start_at:at(-600),as_of:at(0),accounts:{weather:account,bitcoin:account,hold:account}}};
+  const html=bitcoinView(snapshot,ui);
+  assert.match(html,/Last observed quote/);
+  assert.match(html,/\$95,813\.12/);
+  assert.match(html,/data-action="btc-auto" data-value="true"[\s\S]*?aria-checked="false"/);
+  assert.match(html,/data-action="btc-feed" data-value="false"[\s\S]*?aria-checked="true"/);
+  assert.match(html,/Passive \$500 BTC hold/);
+  assert.match(html,/Central Park strategy/);
+  assert.match(html,/\+0.1%/);
+  assert.match(html,/Paper fill &lt;checked&gt;/);
+  assert.match(html,/0\.005 BTC/);
+  snapshot.comparison={accounts:{}};
+  assert.match(bitcoinView(snapshot,ui),/Waiting for the first shared equity marks/);
+  assert.match(bitcoinView(snapshot,{...ui,connected:false}),/Unknown/);
+  const options=optionsView();
+  assert.match(options,/Coming soon/);
+  assert.match(options,/being built/);
+  assert.doesNotMatch(options,/data-action=|role="switch"/);
 });

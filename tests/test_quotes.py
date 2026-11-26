@@ -350,7 +350,9 @@ class PublicQuotesTest(unittest.TestCase):
             self.assertEqual(
                 sum(call.args[0] == feeds.OPEN for call in network.call_args_list), 1
             )
-            self.assertLessEqual(network.call_count, 2)
+            # The startup catalog may wake either history reader before the
+            # test revokes permission. Each can make at most one attempt.
+            self.assertLessEqual(network.call_count, 3)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,65 @@
+.btc-workspace,.btc-sections { display:grid; min-width:0; align-content:start; gap:16px; }
+.btc-grid {
+  display:grid;
+  grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);
+  align-items:start;
+  gap:20px;
+}
+.btc-workspace .panel { min-width:0; }
+.btc-feed-control.paper-switch { color:#41494f;background:#f2f3f3;border-color:#b9bec1; }
+.btc-feed-control.paper-switch.is-on .paper-lamp { background:#35644d; }
+.btc-feed-control.paper-switch .paper-lamp::after { display:none;animation:none; }
+.btc-chart-body { container-type:inline-size; }
+.btc-top-quote,.btc-account-lead {
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:8px 16px;
+  margin:12px 0 18px;
+}
+.btc-top-quote dt,.btc-account-lead dt,.btc-hold-mark dt { color:var(--muted);font-size:.81rem; }
+.btc-top-quote dd,.btc-account-lead dd,.btc-hold-mark dd {
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+.btc-top-quote dd { font-size:clamp(1.5rem,2.7vw,2.45rem);line-height:1.22;letter-spacing:-.045em; }
+.btc-account-lead { margin:0 0 10px; }
+.btc-account-lead dd { font-size:clamp(1.15rem,2vw,1.6rem);line-height:1.3;letter-spacing:-.025em; }
+.btc-account-lead>div+div,.btc-top-quote>div+div { padding-left:16px;border-left:1px solid var(--line); }
+.btc-market .btc-windows { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.btc-market .chart-heading { align-items:center;flex-direction:row; }
+.btc-market .btc-windows { width:auto; }
+.btc-market .bitcoin-plot { grid-template-columns:5.9rem minmax(0,1fr); }
+.btc-market .history-ranges { display:block; }
+.btc-market .history-ranges dd { overflow-wrap:anywhere; }
+.btc-target { font-size:1.15rem;line-height:1.4;margin:0 0 10px; }
+.btc-note,.btc-empty { color:var(--muted);font-size:.84rem;line-height:1.5;max-width:85ch;overflow-wrap:anywhere; }
+.btc-note + .btc-note,.btc-hold-mark,.btc-workspace .field-list + .btc-note { margin-top:8px; }
+.btc-compare { margin:8px 0 10px; }
+.btc-compare th,.btc-compare td { font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap; }
+.btc-compare th:first-child { text-align:left; }
+.btc-hold-mark { display:flex;flex-wrap:wrap;gap:8px 24px; }
+.btc-hold-mark>div { display:flex;flex-wrap:wrap;gap:3px 7px;align-items:baseline; }
+.btc-hold-mark dd { font-size:.86rem;font-weight:600; }
+.btc-activity { list-style:none;padding:0; }
+.btc-activity li { display:grid;grid-template-columns:minmax(12rem,.55fr) minmax(0,2fr);gap:5px 14px;padding:8px 0;border-top:1px solid var(--line);font-size:.875rem;overflow-wrap:anywhere; }
+.btc-activity li:first-child { border:0;padding-top:0; }
+.btc-activity time { color:var(--muted);font-variant-numeric:tabular-nums; }
+.options-coming { max-width:46rem;padding:clamp(20px,3vw,36px); }
+.options-coming h2 { font-size:1.55rem;font-weight:400;letter-spacing:-.025em; }
+.options-coming p { font-size:.95rem;color:var(--muted);margin-top:6px; }
+@media (max-width:879px) { .btc-grid { grid-template-columns:minmax(0,1fr);gap:16px; } }
+@media (max-width:674px) { .btc-activity li { grid-template-columns:minmax(0,1fr); } }
+@container (max-width:22rem) {
+  .btc-market .chart-heading { align-items:flex-start;flex-direction:column; }
+  .btc-market .bitcoin-plot { grid-template-columns:4.9rem minmax(0,1fr); }
+  .btc-top-quote,.btc-account-lead {column-gap:7px}
+  .btc-account-lead>div+div,.btc-top-quote>div+div {padding-left:7px}
+}
+@container (max-width:16rem) {
+  .btc-market .btc-windows { width:100%; }
+  .btc-market .btc-windows button:nth-child(3) { border-top:0;border-left:1px solid #b9bec1; }
+  .btc-market .bitcoin-plot { grid-template-columns:3.45rem minmax(0,1fr); }
+  .btc-market .bitcoin-plot .quote-y-axis text { font-size:.59rem; }
+  .btc-top-quote { grid-template-columns:minmax(0,1fr); }
+  .btc-top-quote>div+div {padding:0;border:0}
+}

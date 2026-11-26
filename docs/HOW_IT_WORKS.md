@@ -1,18 +1,24 @@
 # How Prediction Market Bot works
 
-Prediction Market Bot (PMB) follows one series on one venue. Each Kalshi `KXHIGHNY` event asks which temperature range contains the highest temperature recorded for New York’s Central Park on a particular date. PMB collects the contract terms and weather reports, estimates the chance of a range, and simulates buying YES or NO when the visible order book offers a favorable price after costs. Every balance, position, fill and settlement in the app belongs to a local paper account. [Kalshi’s series and public data example](https://docs.kalshi.com/getting_started/quick_start_market_data)
+The Central Park weather workspace follows one Kalshi series. The Bitcoin workspace tests spot BTC/USD in a separate account. Each Kalshi `KXHIGHNY` event asks which temperature range contains the highest temperature recorded for New York’s Central Park on a particular date. PMB collects the contract terms and weather reports, estimates the chance of a range, and simulates buying YES or NO when the visible order book offers a favorable price after costs. Every balance, position, fill and settlement in the app belongs to a local paper account. [Kalshi’s series and public data example](https://docs.kalshi.com/getting_started/quick_start_market_data)
 
 ## Follow one contract through the desk
 
 | View | What to look for |
 | --- | --- |
-| **Markets** | Select a contract by date and temperature range. Read its posted YES bid and ask, see whether either moved since the previous comparable poll, and inspect actual observations over 15 minutes, one hour or four hours. |
+| **Markets** | Select a contract by date and temperature range. Read its posted YES bid and ask, see whether either moved since the previous comparable poll, and inspect actual observations over 15 minutes, one hour, four hours, 24 hours, 48 hours or seven days. |
 | **Research** | Open a contract. **Decision** gives the current reason, modeled probability, expected costs and eligible size when available. **Evidence** shows sources available at the cutoff. **Order book** shows available price and quantity. **Settlement** shows the venue result and paper payout when known. |
 | **Portfolio** | Read net gain or loss for the selected account, available and reserved cash, current marks, trading fees and open exposure by event. The forecast scorecard compares three probability estimates across the same dates. |
 | **Activity** | See forward scan receipts, paper orders, fills, pauses and settlements. The forward **Market updates** section shows recent changes where two observations of the same side can be compared. |
 | **Worker** | Select the visible account, grant public market collection permission, pause paper entries, review health, configure local time display or enable an optional research provider. |
 
 **Replay and forward are two accounts.** Both begin with $10,000 of paper cash. Replay uses a versioned synthetic case with known forecast records, books and outcomes. Forward begins building its own history when its worker observes actual sources. Selecting an account changes the Research, Portfolio and Activity records on screen. The permission and entry switches determine which forward tasks an online worker may perform. The installation guide covers their defaults. [Setup and first session](SETUP.md)
+
+## Comparing the weather and Bitcoin trials
+
+The top-left selector opens either desk or the Options development screen. The worker stores Bitcoin balances and orders separately. Bitcoin buys only when the most recent completed UTC daily close exceeds the completed close seven days earlier. Eight consecutive closes are required. It checks Bitstamp’s displayed size, buys at the ask and sells at the bid, and applies 0.60% in fees and 0.05% in additional adverse execution per side. These are test assumptions. Each new position uses up to 5% of current equity with a $500 cap including fees. While long, it holds its original BTC quantity until the signal calls for cash. The passive account buys the same initial dollar amount once. [Strategy and historical protocol](BITCOIN_RESEARCH.md) · [BTC worker](../worker/bitcoin.py) · [Exchange market data](https://www.bitstamp.net/api/)
+
+The common comparison records up to one observation per five minutes. It starts from recorded balances on the same date, includes entry costs when both trials start together, and skips intervals without sufficient current quoted depth to value either account. It reports change from that common starting equity and the largest peak-to-trough dollar decline across recorded marks. A paused strategy still has its actual cash and holdings. No ranking is available before the accounts have overlapping observations. [Monitoring calculations](../worker/monitoring.py)
 
 ## From public sources to the screen
 
@@ -37,6 +43,10 @@ The collector reads public NOAA National Blend of Models (NBM) short-range stati
 Each usable input has a source, an issue or observation time where available, the worker’s first availability time and a content digest. Published and retrieved times are kept separately. An observation with a known observation time and unknown publication time can provide dated context. A newly downloaded older bulletin counts as available when the worker acquired it. Reconstructing an earlier decision cannot use a correction, fee change or outcome first available later.
 
 For a new entry, the collector verifies the active binary contract, the station and civil date, its exact integer Fahrenheit boundaries, payout, supported tick grid, current source hierarchy and trading cutoff. For this implementation the certified GLOBALTEMPERATURE terms and the market’s terms identify The Weather Company for the CLINYC event. If the underlying terms change, the worker requires a compatible rule check before trading that contract. An NWS reported temperature alone cannot settle the account. The venue’s final result and payout fields govern settlement. [Kalshi’s contract terms](https://assets.kalshi.com/contract_terms/GLOBALTEMPERATURE.pdf) · [Rule and settlement checks](../worker/feeds.py)
+
+The US Aviation Weather Center also publishes Central Park KNYC routine METARs and special observations. The collector records observation, publication or receipt times separately when available. This second route can expose a newer report from the same station. It contributes context to the evidence view. The calibrated temperature model and official outcome checks keep their own data sources. [Aviation Weather Center API](https://aviationweather.gov/data/api/)
+
+The longer weather charts read completed hourly bid and ask closes with finer data where available. Only periods after a contract listed can contain its quotes. Unobserved intervals display as gaps. On **Activity**, 24h, 48h and 7d show recorded decision changes and completed scan attempts in one-, two- or six-hour intervals. Its expandable log groups matching watch or pass messages produced at the same instant and lists their individual contracts. The chart counts from stored receipts across the selected window. The detail log shows the latest 500 available records. [Weather quotes](../worker/quotes.py) · [Activity aggregation](../worker/monitoring.py)
 
 ### How 30 comparable days become a probability
 
