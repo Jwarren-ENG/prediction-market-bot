@@ -1,0 +1,17 @@
+{
+  "description": "Invented paper-only input for a fictional November 28 contract and thermometer readings. No captured venue book is included.",
+  "now": "2026-11-27T18:50:00Z",
+  "event": "KXHIGHNY-26NOV28",
+  "market": "KXHIGHNY-26NOV28-B77.5",
+  "low": 77,
+  "high": 78,
+  "secondary": "Synthetic exception. The Weather Company may issue a correction for a material error. Missing data can result in a last fair price.",
+  "book": {
+    "orderbook_fp": {
+      "yes_dollars": [["0.0300", "99.00"], ["0.4000", "4.95"]],
+      "no_dollars": [["0.4900", "19.99"], ["0.5200", "1.25"]]
+    }
+  },
+  "product_ids": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+  "certificate": "Synthetic GLOBALTEMPERATURE test certificate"
+}

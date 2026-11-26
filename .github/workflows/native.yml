@@ -1,0 +1,68 @@
+name: Native paper desk
+on:
+  workflow_dispatch:
+  push:
+    paths: ["desktop/**", "ui/**", "worker/**", "tests/**", "scripts/**", "pmb.py", ".github/workflows/native.yml"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify paper engine and private endpoints
+        run: python -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify prices, chart windows and monitoring controls
+        run: node --test tests/test_markets_ui.cjs tests/test_desk_ui.cjs
+      - name: Build native shell
+        run: cargo build --manifest-path desktop/Cargo.toml --locked --release
+      - name: Package and open on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python scripts/fetch_runtime.py windows-x64 build/runtime
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile build/WebView2Setup.exe
+          if ((Get-AuthenticodeSignature build/WebView2Setup.exe).Status -ne 'Valid') { throw 'Microsoft bootstrapper signature verification failed' }
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          if (-not (Test-Path $nsis)) { choco install nsis -y --no-progress }
+          python scripts/package.py --platform windows --binary desktop/target/release/prediction-market-bot.exe --runtime build/runtime --out dist --makensis $nsis --bootstrap build/WebView2Setup.exe
+          $installer = (Get-Item dist/*Setup.exe).FullName
+          $install = Start-Process $installer -ArgumentList '/S' -PassThru -Wait
+          if ($install.ExitCode -ne 0) { throw 'Installer failed' }
+          $app = Join-Path $env:LOCALAPPDATA 'Programs/Prediction Market Bot'
+          $env:PMB_OFFLINE='1'
+          $env:PMB_DESKTOP_SMOKE_ACTION='replay'
+          $env:PMB_PORT='0'
+          $env:PMB_DATA_DIR=Join-Path $env:RUNNER_TEMP 'pmb-native-test'
+          $env:PMB_DESKTOP_SMOKE_REPORT=Join-Path $env:RUNNER_TEMP 'pmb-native-ui.json'
+          & "$app/payload/runtime/python.exe" -I -B "$app/payload/pmb.py" replay-check
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged replay failed' }
+          $process=Start-Process "$app/PMB.exe" -PassThru
+          if (!$process.WaitForExit(75000) -or !(Test-Path $env:PMB_DESKTOP_SMOKE_REPORT)) { throw 'Native webview did not render a paper account' }
+          Get-Content $env:PMB_DESKTOP_SMOKE_REPORT
+          & "$app/payload/runtime/python.exe" -I -B "$app/payload/pmb.py" stop
+      - name: Package and open on macOS
+        if: runner.os == 'macOS'
+        run: |
+          if [ "$(uname -m)" = arm64 ]; then arch=mac-arm64; else arch=mac-x64; fi
+          python scripts/fetch_runtime.py "$arch" build/runtime
+          python scripts/package.py --platform macos --binary desktop/target/release/prediction-market-bot --runtime build/runtime --out dist
+          export PMB_OFFLINE=1 PMB_DESKTOP_SMOKE_ACTION=replay PMB_PORT=0 PMB_DATA_DIR="$RUNNER_TEMP/pmb-native-test" PMB_DESKTOP_SMOKE_REPORT="$RUNNER_TEMP/pmb-native-ui.json"
+          app="dist/Prediction Market Bot.app/Contents/MacOS"
+          "$app/pmb-worker" replay-check
+          "$app/PMB" &
+          for i in $(seq 1 75); do if [ -s "$PMB_DESKTOP_SMOKE_REPORT" ]; then break; fi; sleep 1; done
+          test -s "$PMB_DESKTOP_SMOKE_REPORT"
+          cat "$PMB_DESKTOP_SMOKE_REPORT"
+          "$app/pmb-worker" stop

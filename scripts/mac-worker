@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+payload=$(CDPATH= cd -- "$(dirname -- "$0")/../Resources/payload" && pwd)
+runtime="$payload/runtime"
+if [ "$(uname -m)" = "x86_64" ] && [ -x "$payload/runtime-intel/bin/python3" ]; then runtime="$payload/runtime-intel"; fi
+if [ "${1:-}" = "background" ]; then
+  shift
+  exec "$runtime/bin/python3" -I -B "$payload/background.py" "$@"
+fi
+exec "$runtime/bin/python3" -I -B "$payload/pmb.py" "$@"
