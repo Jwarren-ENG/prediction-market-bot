@@ -28,6 +28,10 @@ def history(db, account, minutes, now, current, *, contract=False, gap_seconds=1
     first_at = db.execute(f"SELECT MIN(at) FROM {table}").fetchone()[0]
     rows = db.execute(f"SELECT at,equity FROM {table} WHERE at>=? AND at<? ORDER BY at", (start_at, end_at))
     start_ms, end_ms = round(opening.timestamp()*1000), round(now.timestamp()*1000)
+    first_ms = round(instant(first_at).timestamp()*1000) if first_at else end_ms
+    # The plot expands a new account's available history to fit the screen.
+    # Bucket that same span so a week view preserves detail during its first day.
+    visible_start = min(end_ms - 60000, max(start_ms, first_ms))
     points = []
     segment = -1
     last_ms = None
@@ -52,7 +56,7 @@ def history(db, account, minutes, now, current, *, contract=False, gap_seconds=1
         if last_ms is None or at_ms - last_ms > gap_seconds * 1000:
             gaps |= count > 0
             segment += 1
-        slot = (at_ms - start_ms) * 144 // (minutes * 60000)
+        slot = (at_ms - visible_start) * 144 // (end_ms - visible_start)
         if slot != bucket:
             flush()
             bucket = slot

@@ -8,6 +8,18 @@ from worker.weather import instant, iso
 
 
 class EquityHistoryTests(unittest.TestCase):
+    def test_new_account_keeps_intrahour_moves_in_the_week_view(self):
+        start = instant("2026-11-26T12:00:00Z")
+        with closing(sqlite3.connect(":memory:")) as db:
+            db.execute(equity.SCHEMA)
+            for n in range(40):
+                equity.record(db, iso(start + timedelta(minutes=n)), 1000000 + n%7)
+            end = start + timedelta(minutes=40)
+            hour = equity.history(db, "spot", 60, end, 1000000)
+            week = equity.history(db, "spot", 10080, end, 1000000)
+            self.assertEqual(week["points"], hour["points"])
+            self.assertEqual(len(week["points"]), 41)
+
     def test_long_window_preserves_extrema_order_and_breaks_after_downsampling(self):
         start = instant("2026-11-20T00:00:00Z")
         with closing(sqlite3.connect(":memory:")) as db:
