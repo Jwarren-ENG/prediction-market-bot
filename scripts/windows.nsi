@@ -10,6 +10,12 @@ ShowInstDetails show
 !include "LogicLib.nsh"
 !include "FileFunc.nsh"
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_HEADER_TEXT "Microsoft component terms"
+!define MUI_PAGE_HEADER_SUBTEXT "Review the terms for the Microsoft components included with this Windows app."
+!define MUI_LICENSEPAGE_TEXT_TOP "Review the terms for Microsoft Visual C++ and Microsoft Edge WebView2 below."
+!define MUI_LICENSEPAGE_CHECKBOX
+!define MUI_LICENSEPAGE_CHECKBOX_TEXT "I accept these Microsoft component terms."
+!insertmacro MUI_PAGE_LICENSE "${COMPONENT_TERMS}"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "$INSTDIR\PMB.exe"
@@ -21,6 +27,21 @@ ShowInstDetails show
 
 !define APPKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\PMBResearchDesk"
 !define WEBVIEWKEY "SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+
+; Interactive installs use the unchecked license-page checkbox. For authorized
+; unattended installations use /S /ACCEPTCOMPONENTTERMS after reviewing the terms.
+Function .onInit
+  IfSilent 0 done
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/ACCEPTCOMPONENTTERMS" $R1
+  IfErrors refused
+  StrCmp $R1 "" done refused
+refused:
+  SetErrorLevel 3
+  Abort
+done:
+FunctionEnd
 
 Section "Paper research desktop"
   SetShellVarContext current

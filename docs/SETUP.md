@@ -1,6 +1,6 @@
 # Set up Prediction Market Bot
 
-Prediction Market Bot (PMB) lets you practice on the daily high temperature in New York’s Central Park. It runs a private worker on your computer and starts two independent paper accounts with $10,000 each. You can try the complete replay without an exchange account, payment method, API key, or internet connection. Public weather and market collection are available when you run the worker online.
+Prediction Market Bot (PMB) lets you practice on the daily high temperature in New York’s Central Park. It runs a private worker on your computer and starts two independent paper accounts with $10,000 each. You can try the complete replay without an exchange account, payment method, API key, or an internet connection once the app is installed. An online worker can collect public weather and market data. [Project repository](https://github.com/Jwarren-ENG/prediction-market-bot) · [Releases and asset downloads](https://github.com/Jwarren-ENG/prediction-market-bot/releases)
 
 | What you want to do | Start here |
 | --- | --- |
@@ -17,7 +17,7 @@ Prediction Market Bot (PMB) lets you practice on the daily high temperature in N
 3. Open the app. The distributed Mac build carries an ad hoc signature and lacks Apple Developer ID notarization. macOS may ask you to review it. Confirm the download source and use the per-app approval procedure appropriate for your system or choose the source installation. [Apple’s guide to downloaded apps](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/mac)
 4. A clean workspace opens in **Research** with the synthetic replay already populated. Open **Worker** and find **Worker health** to see the version, heartbeat and operating mode. Window startup can take a few seconds.
 
-You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it.
+You can verify the bundle's signature integrity and run the offline replay check in Terminal. The code signature check does not identify the publisher. If the release includes a checksum file, compare the downloaded ZIP’s SHA-256 against the entry for the same filename and version before opening it. For example, to calculate the digest for the version 0.1.3 archive in Downloads, run `shasum -a 256 "$HOME/Downloads/PMB-0.1.3-macOS-Universal.zip"`.
 
 ~~~sh
 app="$HOME/Applications/Prediction Market Bot.app"
@@ -29,7 +29,7 @@ worker="$app/Contents/MacOS/pmb-worker"
 ## Install on Windows
 
 1. Download the **Windows x64 Setup.exe** asset from the same GitHub release. For version 0.1.3, its name is `PMB-0.1.3-Windows-x64-Setup.exe`. If checksums accompany the download, use PowerShell’s `Get-FileHash -Algorithm SHA256` with the installer path and compare the result.
-2. Run the installer under the Windows account that will own the practice desk. By default it installs under `%LOCALAPPDATA%\Programs\Prediction Market Bot`. The PMB installer is unsigned. Review your organization’s software policy if Windows asks about the publisher.
+2. Run the installer under the Windows account that will own the practice desk. Review its bundled component terms on the agreement screen. By default it installs under `%LOCALAPPDATA%\Programs\Prediction Market Bot`. The PMB installer is unsigned. Review your organization’s software policy if Windows asks about the publisher.
 3. The normal installer checks for Microsoft Edge WebView2. If the runtime is missing, the included Microsoft bootstrapper uses the network to install it. On an offline or managed PC, an administrator can provision Microsoft’s Evergreen Runtime before installation. [Microsoft WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution)
 4. Open **Start → Prediction Market Bot → Prediction Market Bot**. Find **Research** and **Worker**. Python is included in the package. If the native window cannot open, you can still check the installed worker using PowerShell.
 
@@ -40,7 +40,7 @@ $entry = Join-Path $payload 'pmb.py'
 & $python -I -B $entry replay-check
 ~~~
 
-For the browser interface, run `& $python -I -B $entry serve` in one private PowerShell window. In a second window, set the same three variables and run `& $python -I -B $entry connect`. Open the returned private link. If a worker is already running, go straight to `connect`. A successful browser session verifies the packaged worker independently of the native WebView2 window. Check the release notes or native workflow result for Windows desktop validation for your build. [Native workflow](../.github/workflows/native.yml)
+For the browser interface, run `& $python -I -B $entry serve` in one private PowerShell window. In a second window, set the same three variables and run `& $python -I -B $entry connect`. Open the returned private link. If a worker is already running, go straight to `connect`. A successful browser session verifies the packaged worker independently of the native WebView2 window. Check the release notes or native workflow result for Windows desktop validation for your build. [Release assets](https://github.com/Jwarren-ENG/prediction-market-bot/releases) · [Native workflow runs](https://github.com/Jwarren-ENG/prediction-market-bot/actions)
 
 ## First session
 
@@ -55,16 +55,23 @@ For the browser interface, run `& $python -I -B $entry serve` in one private Pow
 
 1. In **Worker → Operating mode**, choose **Forward paper**. The first online scan can fetch public National Weather Service and NOAA data before you enable Kalshi. Look for **Recent public weather reports** and the most recent scan details.
 2. Decide whether you want automatic paper entries. To start by observing only, choose **Pause entries** in **Worker → Paper automation** before authorizing market capture. On a new worker, eligible paper entries are otherwise armed as soon as market permission and the strategy’s requirements are satisfied.
-3. Under **Paper automation → Public market collection**, check **I authorize market data capture under my applicable terms** if permitted for your private use. The worker reads the public Kalshi API. No exchange key is involved. Clearing the checkbox stops new venue requests, discards in-flight venue data and clears the in-memory display history. Prior forward evidence and ledger records stay in the private workspace. [Kalshi’s public market data guide](https://docs.kalshi.com/getting_started/quick_start_market_data)
+3. Under **Paper automation → Public market collection**, check **I authorize market data capture under my applicable terms** if permitted for your private use. The worker reads the public Kalshi API. No exchange key is involved. Clearing the checkbox stops new venue requests, discards in-flight venue data and clears the in-memory display history. Prior forward evidence and ledger records stay in the private workspace. [Kalshi’s public market data guide](https://docs.kalshi.com/getting_started/quick_start_market_data) · [Kalshi data terms](https://kalshi-public-docs.s3.amazonaws.com/kalshi-data-terms-of-service.pdf)
 4. Open **Markets** and select a contract. **Last venue response received** should advance roughly every 15 seconds during normal operation, even when prices hold steady. **Price history** opens on **4 hours**. Choose **1 hour** or **15 min** to zoom in. **Recent observations** labels each timestamp as a worker poll or a Kalshi minute close. A new process can retrieve completed minutes from before startup. A missing side, unavailable minute or new listing can leave a gap.
-5. Choose **Run scan** for a full weather, contract, depth, fee and risk assessment. The button reports **Scanning…**, **Scan complete**, **Scan complete with gaps**, or **Scan failed**. Inspect the receipt in **Activity** and the contract’s **Decision** and **Evidence** tabs in **Research**. A healthy new installation will often show **Watch** while the model accumulates at least 30 comparable resolved station days. Waiting for calibration is a valid outcome.
+5. Choose **Run scan** for a full weather, contract, depth, fee and risk assessment. The button reports **Scanning…**, **Scan complete**, **Scan complete with gaps**, or **Scan failed**. Inspect the receipt in **Activity** and the contract’s **Decision** and **Evidence** tabs in **Research**. A new installation will often show **Watch** while the model accumulates qualifying history. On **Portfolio → Evidence for paper entries**, **Comparable station days** shows the best-covered open forecast against its minimum. **Contracts with enough history** counts how many open contracts with checked sample counts meet that threshold. The panel appears once suitable forward records exist.
 6. **Paper auto trading** on **Markets** and **Research** controls future forward paper entries. The switch reports **Yes**, **No** or **Unknown** based on worker confirmation. It cannot clear a risk stop. Use **Worker → Paper automation → Recheck risk and resume** after reviewing the cause. The Worker panel’s pause/resume applies across the paper workspaces. A pause allows ongoing quote collection, evidence checks and settlement of existing positions while market permission is active.
 
 ## Run from source
 
 Use Python 3.12 or later for these instructions. The worker and browser interface use Python’s standard library and the assets in `ui/`. Node.js is needed only for the JavaScript tests. Rust and Tauri are needed to build the native desktop window. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-Download the source archive for the release and extract it, or copy the HTTPS clone URL from the repository’s **Code** menu and clone it. Open a terminal in the folder that contains `pmb.py`, `worker` and `ui`. On Windows, use `py -3.13` in place of `python3` if the Python launcher is installed with Python 3.13. You can also use the full path to a supported Python executable.
+Download and extract the source archive for the release. If you use Git, these commands check out the source for version 0.1.3.
+
+~~~sh
+git clone --branch v0.1.3 --depth 1 https://github.com/Jwarren-ENG/prediction-market-bot.git pmb
+cd pmb
+~~~
+
+Open a terminal in the folder that contains `pmb.py`, `worker` and `ui`. On Windows, use `py -3.13` in place of `python3` if the Python launcher is installed with Python 3.13. You can also use the full path to a supported Python executable.
 
 ~~~sh
 python3 --version
@@ -100,6 +107,59 @@ python3 -B -m unittest discover -s tests -v
 node --test tests/test_markets_ui.cjs
 python3 -I -B pmb.py replay-check
 ~~~
+
+## Build the native packages
+
+Use a source checkout at the same tag as the package you want to reproduce. The following recipes target **v0.1.3**. The native build needs a current stable Rust toolchain, Cargo, Python 3.12 or later and the platform tools below. Run all commands from the repository root. Package to a fresh output directory. The packager refuses to overwrite a previous app or installer, and the runtime fetcher expects its destination to be new. Runtime archives are pinned by version and SHA-256 in the repository. [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/) · [Runtime pins](../scripts/fetch_runtime.py) · [Third-party notices](THIRD_PARTY.md)
+
+**macOS universal ZIP.** Install Xcode Command Line Tools and Rust with rustup on the build Mac. Both Rust targets are needed even when the machine itself is Apple Silicon. The packager uses `lipo` for the universal executable and includes both runtimes.
+
+~~~sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+rustup component add rust-docs
+cargo build --manifest-path desktop/Cargo.toml --locked --release --target aarch64-apple-darwin
+cargo build --manifest-path desktop/Cargo.toml --locked --release --target x86_64-apple-darwin
+
+python3 scripts/fetch_runtime.py mac-arm64 build/runtime-arm64
+python3 scripts/fetch_runtime.py mac-x64 build/runtime-intel
+python3 scripts/package.py --platform macos \
+  --binary desktop/target/aarch64-apple-darwin/release/prediction-market-bot \
+  --runtime build/runtime-arm64 \
+  --intel-binary desktop/target/x86_64-apple-darwin/release/prediction-market-bot \
+  --intel-runtime build/runtime-intel \
+  --out dist-macos
+
+codesign --verify --deep --strict "dist-macos/Prediction Market Bot.app"
+"dist-macos/Prediction Market Bot.app/Contents/MacOS/pmb-worker" replay-check
+ditto -c -k --sequesterRsrc --keepParent "dist-macos/Prediction Market Bot.app" \
+  "dist-macos/PMB-0.1.3-macOS-Universal.zip"
+~~~
+
+For a build for your Mac’s own architecture, run `cargo build --manifest-path desktop/Cargo.toml --locked --release`, fetch just the runtime for that architecture, use `desktop/target/release/prediction-market-bot` as `--binary` and omit both Intel companion options. Label that ZIP with the architecture it contains. A shell built without packaging needs a matching bundled worker payload to start. The packager applies and verifies an ad hoc signature by default. Developer ID signing and Apple notarization are separate release operations.
+
+**Windows x64 installer.** Use an x64 Windows build host with Visual Studio C++ Build Tools (Desktop development with C++ and a Windows SDK), the stable x64 MSVC Rust toolchain, NSIS and Python. Use an x64 Developer PowerShell. The following block checks the Microsoft signature on the WebView2 bootstrapper before embedding it. Adjust the `makensis.exe` path if NSIS was installed elsewhere.
+
+~~~powershell
+rustup component add rust-docs
+cargo build --manifest-path desktop/Cargo.toml --locked --release
+py -3.13 scripts/fetch_runtime.py windows-x64 build/runtime-win-x64
+
+$bootstrap = Join-Path (Resolve-Path 'build') 'WebView2Setup.exe'
+Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrap
+$signature = Get-AuthenticodeSignature $bootstrap
+if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') {
+    throw 'The Microsoft WebView2 bootstrapper signature could not be verified.'
+}
+$nsis = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'NSIS\makensis.exe'
+if (-not (Test-Path $nsis)) { throw 'Set $nsis to the installed makensis.exe.' }
+
+py -3.13 scripts/package.py --platform windows --binary desktop/target/release/prediction-market-bot.exe --runtime build/runtime-win-x64 --bootstrap $bootstrap --makensis $nsis --out dist-windows
+Get-FileHash -Algorithm SHA256 'dist-windows/PMB-0.1.3-Windows-x64-Setup.exe'
+~~~
+
+The resulting PMB setup executable is unsigned. Install it using the Windows procedure above, run the packaged replay, and open the native window to check it on Windows. The **Native paper desk** GitHub Actions workflow has separate macOS and Windows jobs. It runs the test suites and exercises packaged components on the target hosts. Select a run for the commit you are installing to inspect its outcome. [Build workflow](../.github/workflows/native.yml) · [Actions runs](https://github.com/Jwarren-ENG/prediction-market-bot/actions) · [Packaging flags](../scripts/package.py)
+
+For an unattended installation, review the bundled third-party component terms first. If you accept them, pass `/S /ACCEPTCOMPONENTTERMS` to the setup executable. Interactive installs present the terms before copying files. [Component notices](THIRD_PARTY.md)
 
 ## Run the worker at login
 
@@ -208,7 +268,7 @@ For upgrades, back up first, stop the supervised worker, replace the packaged ap
 | Weather appears but **Markets** is empty | Check **Public market collection**, whether the host is online, and the message above the list. An empty active catalog, a network error and a Kalshi rate limit have distinct messages. |
 | Chart rows stay flat, have a blank side, or start late | Read the last venue receipt and **Recent observations**. Venues can report unchanged prices or omit one side or some minute closes. A just-listed contract may have very little history. |
 | A scan is partial, or every contract says **Watch** | Open the latest **Activity** receipt and the contract’s **Decision** tab. Common reasons include an unavailable source, a changed rule or fee, stale depth, or insufficient comparable resolved days. |
-| New entries remain paused | Inspect **Worker → Paper automation** and **Portfolio → Paper risk**. A risk stop needs the cause to clear and an explicit recheck. Rerunning replay does not alter the forward account. |
+| New entries remain paused | Inspect **Worker → Paper automation** and **Portfolio → Paper risk**. A risk stop needs the cause to clear and an explicit recheck. The forward risk latch persists across restarts. |
 | An external analyst is unavailable | Check provider enablement, model access, key availability in the worker’s account, and daily and monthly budgets. Verify a **local** note first. |
 | The app closes but requests continue | The worker and window have separate lifetimes. See **Run the worker at login** and use the appropriate `stop` command when you intend to stop all work. |
 

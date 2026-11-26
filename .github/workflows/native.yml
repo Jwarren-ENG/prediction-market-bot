@@ -25,6 +25,17 @@ jobs:
           node-version: '24'
       - name: Verify prices, chart windows and monitoring controls
         run: node --test tests/test_markets_ui.cjs tests/test_desk_ui.cjs
+      - name: Remove builder-specific paths from the native executable
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          flags = [f'--remap-path-prefix={Path.home()}=/build/home',
+                   f'--remap-path-prefix={Path.cwd()}=/src/prediction-market-bot']
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              print('CARGO_ENCODED_RUSTFLAGS=' + chr(31).join(flags), file=env)
+      - name: Install the compiler's redistribution notices
+        run: rustup component add rust-docs
       - name: Build native shell
         run: cargo build --manifest-path desktop/Cargo.toml --locked --release
       - name: Package and open on Windows
@@ -37,8 +48,11 @@ jobs:
           $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
           if (-not (Test-Path $nsis)) { choco install nsis -y --no-progress }
           python scripts/package.py --platform windows --binary desktop/target/release/prediction-market-bot.exe --runtime build/runtime --out dist --makensis $nsis --bootstrap build/WebView2Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging failed' }
           $installer = (Get-Item dist/*Setup.exe).FullName
-          $install = Start-Process $installer -ArgumentList '/S' -PassThru -Wait
+          $unaccepted = Start-Process $installer -ArgumentList '/S' -PassThru -Wait
+          if ($unaccepted.ExitCode -ne 3) { throw 'Silent install must require Microsoft component terms acceptance' }
+          $install = Start-Process $installer -ArgumentList '/S','/ACCEPTCOMPONENTTERMS' -PassThru -Wait
           if ($install.ExitCode -ne 0) { throw 'Installer failed' }
           $app = Join-Path $env:LOCALAPPDATA 'Programs/Prediction Market Bot'
           $env:PMB_OFFLINE='1'
@@ -52,6 +66,14 @@ jobs:
           if (!$process.WaitForExit(75000) -or !(Test-Path $env:PMB_DESKTOP_SMOKE_REPORT)) { throw 'Native webview did not render a paper account' }
           Get-Content $env:PMB_DESKTOP_SMOKE_REPORT
           & "$app/payload/runtime/python.exe" -I -B "$app/payload/pmb.py" stop
+      - name: Retain the installer tested on Windows
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-x64-Setup
+          path: dist/*-Windows-x64-Setup.exe
+          if-no-files-found: error
+          retention-days: 7
       - name: Package and open on macOS
         if: runner.os == 'macOS'
         run: |

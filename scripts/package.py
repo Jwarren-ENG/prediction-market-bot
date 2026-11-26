@@ -5,14 +5,21 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
+import sys
 import tempfile
+
+if __package__:
+    from . import notices
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import notices
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = "Prediction Market Bot"
 VERSION = "0.1.3"
 
 
-def payload(target, runtime):
+def payload(target, runtime, stdlib_notice, windows=False):
     target.mkdir(parents=True)
     omit = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store")
     for name in ("worker", "ui"):
@@ -20,6 +27,7 @@ def payload(target, runtime):
     shutil.copy2(ROOT / "pmb.py", target / "pmb.py")
     shutil.copytree(runtime, target / "runtime", symlinks=True, ignore=omit)
     shutil.copy2(ROOT / "scripts" / "background.py", target / "background.py")
+    notices.install(target / "notices", stdlib_notice, windows)
 
 
 def mac(args, temp, output):
@@ -44,7 +52,7 @@ def mac(args, temp, output):
     shutil.copy2(ROOT / "scripts/mac-worker", helper)
     helper.chmod(0o755)
     resources = contents / "Resources"
-    payload(resources / "payload", args.runtime)
+    payload(resources / "payload", args.runtime, args.rust_stdlib_notice)
     if args.intel_runtime:
         shutil.copytree(
             args.intel_runtime,
@@ -89,7 +97,7 @@ def windows(args, temp, output):
     loader = args.binary.parent / "WebView2Loader.dll"
     if loader.is_file():
         shutil.copy2(loader, stage / loader.name)
-    payload(stage / "payload", args.runtime)
+    payload(stage / "payload", args.runtime, args.rust_stdlib_notice, windows=True)
     if not (stage / "payload/runtime/python.exe").is_file():
         raise ValueError("Expected the Windows x64 Python runtime.")
     dest = output / f"PMB-{VERSION}-Windows-x64-Setup.exe"
@@ -108,6 +116,7 @@ def windows(args, temp, output):
             "WEBVIEW": args.bootstrap,
             "OUTPUT": dest,
             "APPICON": ROOT / "desktop/icons/icon.ico",
+            "COMPONENT_TERMS": stage / "payload/notices/WINDOWS-COMPONENT-TERMS.txt",
         }.items()
     )
     remove = temp / "remove-owned.nsh"
@@ -147,6 +156,11 @@ def main():
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--rust-stdlib-notice",
+        type=Path,
+        help="COPYRIGHT-library.html from the Rust toolchain that built the native binary; defaults to rustc's sysroot",
+    )
     parser.add_argument(
         "--intel-binary",
         type=Path,
