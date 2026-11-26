@@ -20,6 +20,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 from . import monitoring
 from .bitcoin import BitcoinPaper, quote_fresh
+from .bitcoin_contracts import BitcoinContracts
 from .feeds import collect
 from .ledger import Ledger
 from .notifications import Notifications
@@ -31,6 +32,7 @@ from .weather import instant
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47823
+VERSION = "0.2.1"
 LOG = logging.getLogger("pmb")
 
 
@@ -59,6 +61,7 @@ class Desk:
         self.online = online
         self.quotes = QuoteTape(self._quote_access, self.transition)
         self.bitcoin = BitcoinPaper(directory, online=online)
+        self.bitcoin_contracts = BitcoinContracts(self._quote_access, self.transition)
         self.next_pair = 0.0
         self.interval = interval
         self.started = utc()
@@ -115,6 +118,17 @@ class Desk:
             "reason": reason,
         }
 
+    def desk_snapshot(self, desk):
+        """Independent desktop reads share only the worker heartbeat."""
+        snapshot = {"version": VERSION, "health": {"online": self.online, "heartbeat": self.heartbeat}}
+        if desk == "bitcoin":
+            snapshot["bitcoin"] = self.bitcoin.state()
+            snapshot["bitcoin_contracts"] = self.bitcoin_contracts.state()
+        elif desk == "comparison":
+            with self.store.connection() as db:
+                snapshot["comparison"] = monitoring.comparison(db)
+        return snapshot
+
     def state(self, *, activity_hours=None, bitcoin=False):
         mode = self.mode()
         output = self.ledgers[mode].state()
@@ -151,7 +165,7 @@ class Desk:
             )[:500]
         output.update(
             {
-                "version": "0.2.0",
+                "version": VERSION,
                 "mode": mode,
                 "paper_automation": self.paper_automation(),
                 "research": self.research.state(mode),
@@ -433,18 +447,14 @@ class Desk:
         return True
 
     def schedule(self):
-        quote_thread = None
-        bitcoin_thread = None
+        collectors = []
         if self.online:
-            quote_thread = threading.Thread(
-                target=self.quotes.run,
-                args=(self.stop,),
-                name="public-quote-sampler",
-                daemon=True,
-            )
-            quote_thread.start()
-            bitcoin_thread = threading.Thread(target=self.bitcoin.run, args=(self.stop,), name="bitcoin-paper", daemon=True)
-            bitcoin_thread.start()
+            for name, collector in (("public-quote-sampler", self.quotes),
+                                    ("bitcoin-paper", self.bitcoin),
+                                    ("bitcoin-contract-quotes", self.bitcoin_contracts)):
+                thread = threading.Thread(target=collector.run, args=(self.stop,), name=name, daemon=True)
+                thread.start()
+                collectors.append(thread)
         try:
             while not self.stop.is_set():
                 self.heartbeat = utc()
@@ -464,10 +474,9 @@ class Desk:
                 self.wake.clear()
         finally:
             self.quotes.wake.set()
-            if quote_thread:
-                quote_thread.join(timeout=1)
-            if bitcoin_thread:
-                bitcoin_thread.join(timeout=1)
+            self.bitcoin_contracts.wake.set()
+            for thread in collectors:
+                thread.join(timeout=1)
 
     def action(self, action, value):
         with self.transition:
@@ -513,6 +522,7 @@ class Desk:
                         }
                     )
                     self.quotes.permission_changed()
+                    self.bitcoin_contracts.permission_changed()
                     self.scan_revision += 1
                     self.next_scan = 0.0
                     self.wake.set()
@@ -609,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.permitted(path.startswith("/api/")):
             return
         if path == "/healthz":
-            payload = {"service": "pmb-paper", "version": "0.2.0"}
+            payload = {"service": "pmb-paper", "version": VERSION}
             nonce = parse_qs(urlsplit(self.path).query).get("challenge", [""])[0]
             if len(nonce) == 48 and all(c in "0123456789abcdef" for c in nonce):
                 payload.update(
@@ -626,12 +636,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"service": "pmb-paper", "pid": os.getpid()})
         if path == "/api/notifications/preview":
             return self.reply(200, self.server.desk.notifications.preview())
-        if path == "/api/state":
+        if path in ("/api/bitcoin", "/api/comparison", "/api/status", "/api/state"):
             params = parse_qs(urlsplit(self.path).query)
             hours = params.get("activity_hours", [None])[0]
             if hours is not None and hours not in {"24", "48", "168"}:
                 return self.reply(400, {"error": "Choose 24, 48 or 168 activity hours."})
             try:
+                if path != "/api/state":
+                    return self.reply(200, self.server.desk.desk_snapshot(path.removeprefix("/api/")))
                 return self.reply(200, self.server.desk.state(
                     activity_hours=int(hours) if hours else None,
                     bitcoin=params.get("workspace") == ["bitcoin"],

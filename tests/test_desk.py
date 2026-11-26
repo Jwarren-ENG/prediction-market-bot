@@ -78,6 +78,23 @@ class DesktopServiceTest(unittest.TestCase):
         self.assertEqual(self.api("/api/state?activity_hours=22")[0], 400)
         self.assertEqual(self.api("/api/state?workspace=bitcoin", private=False)[0], 401)
 
+    def test_desks_request_only_their_own_state(self):
+        with patch.object(self.desk, "state", side_effect=AssertionError("Weather desk accessed")):
+            status, raw = self.api("/api/bitcoin")
+            self.assertEqual(status, 200)
+            bitcoin = json.loads(raw)
+            self.assertEqual(set(bitcoin), {"version", "health", "bitcoin", "bitcoin_contracts"})
+            self.assertIn(bitcoin["bitcoin_contracts"]["status"], ("disabled", "offline"))
+            with patch.object(self.desk.bitcoin, "state", side_effect=AssertionError("Spot desk accessed")):
+                status, raw = self.api("/api/comparison")
+                self.assertEqual(status, 200)
+                self.assertEqual(set(json.loads(raw)), {"version", "health", "comparison"})
+                status, raw = self.api("/api/status")
+                self.assertEqual(status, 200)
+                self.assertEqual(set(json.loads(raw)), {"version", "health"})
+        for resource in ("bitcoin", "comparison", "status"):
+            self.assertEqual(self.api("/api/" + resource, private=False)[0], 401)
+
     def test_origin_content_type_and_host_validation(self):
         host, port = self.server.server_address
         for origin, expected in ((f"http://{host}:{port}", 200), ("null", 403)):

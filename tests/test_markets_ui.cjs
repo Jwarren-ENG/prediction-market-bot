@@ -1,11 +1,11 @@
 const {before, test} = require('node:test');
 const assert = require('node:assert/strict');
 
-let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone, bitcoinWindow, bitcoinView, optionsView;
+let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone, bitcoinWindow, bitcoinCountdown, bitcoinView, comparisonView, optionsView;
 before(async () => {
   ({quoteRows, quoteWindow, marketsView, paperSwitch} = await import('../ui/markets.js'));
   ({setDisplayTimeZone} = await import('../ui/common.js'));
-  ({bitcoinWindow,bitcoinView,optionsView} = await import('../ui/bitcoin.js'));
+  ({bitcoinWindow,bitcoinCountdown,bitcoinView,comparisonView,optionsView} = await import('../ui/bitcoin.js'));
   setDisplayTimeZone('UTC');
 });
 
@@ -257,7 +257,7 @@ test('Bitcoin chart uses only completed hourly spot closes, honors each window a
     assert.equal(w.observed.length,expected);
     assert.ok(w.observed.every(p=>p.close>=90000 && p.close<99999));
   }
-  const html=bitcoinView({bitcoin:market},{connected:true,locked:false,btcRange:1440});
+  const html=bitcoinView({bitcoin:market},{connected:true,locked:false,btcPanel:'spot',btcRange:1440});
   assert.equal((html.match(/class="quote-line bid"/g)||[]).length,2);
   assert.equal((html.match(/class="quote-point bid"/g)||[]).length,1);
   assert.match(html,/5 completed hourly closes/);
@@ -266,28 +266,98 @@ test('Bitcoin chart uses only completed hourly spot closes, honors each window a
   assert.match(html,/Awaiting first quote/);
 });
 
-test('Bitcoin controls, stale quote and comparison use their own authoritative accounts', () => {
+test('the Bitcoin spot strategy and the independent Compare tab read only their own accounts', () => {
   const market={enabled:true,auto_enabled:false,online:true,status:'Delayed',last_checked_at:at(0),
     quote:{fresh:false,bid_usd:'95813.12',ask_usd:'95814.89',source_at:at(-600)},portfolio:{equity_cents:1000000,btc:'0.05000000'},
     benchmark:{equity_cents:1001000,btc:'0.005'},activity:[{at:at(-30),message:'Paper fill <checked>'}]};
   const account={start_cents:1000000,end_cents:1001000,net_cents:1000,return_pct:.1,drawdown_cents:225};
-  const ui={connected:true,locked:false,btcRange:1440};
+  const ui={connected:true,locked:false,btcPanel:'spot',btcRange:1440};
   const snapshot={mode:'replay',paper_automation:{enabled:true},bitcoin:market,comparison:{start_at:at(-600),as_of:at(0),accounts:{weather:account,bitcoin:account,hold:account}}};
   const html=bitcoinView(snapshot,ui);
   assert.match(html,/Last observed quote/);
   assert.match(html,/\$95,813\.12/);
   assert.match(html,/data-action="btc-auto" data-value="true"[\s\S]*?aria-checked="false"/);
   assert.match(html,/data-action="btc-feed" data-value="false"[\s\S]*?aria-checked="true"/);
-  assert.match(html,/Passive \$500 BTC hold/);
-  assert.match(html,/Central Park strategy/);
-  assert.match(html,/\+0.1%/);
+  assert.doesNotMatch(html,/Passive \$500 BTC hold|Central Park strategy|Strategy comparison|\+0.1%/);
   assert.match(html,/Paper fill &lt;checked&gt;/);
   assert.match(html,/0\.005 BTC/);
+  const compare=comparisonView(snapshot,ui);
+  assert.match(compare,/Passive \$500 BTC hold/);
+  assert.match(compare,/Central Park strategy/);
+  assert.match(compare,/\+0.1%/);
+  assert.match(compare,/Common start/);
+  assert.match(compare,/Latest shared mark/);
+  assert.doesNotMatch(compare,/0\.005 BTC|Spot strategy<\/button>|data-action="btc-auto"|Passive BTC position|\$95,813/);
   snapshot.comparison={accounts:{}};
-  assert.match(bitcoinView(snapshot,ui),/Waiting for the first shared equity marks/);
+  assert.match(comparisonView(snapshot,ui),/Waiting for the first shared equity marks/);
   assert.match(bitcoinView(snapshot,{...ui,connected:false}),/Unknown/);
   const options=optionsView();
   assert.match(options,/Coming soon/);
   assert.match(options,/being built/);
   assert.doesNotMatch(options,/data-action=|role="switch"/);
+});
+
+const btcSidePoint = (sec,yesBid,yesAsk,noBid,noAsk) => ({at:at(sec),kind:'book',
+  yes_bid_cents:yesBid,yes_ask_cents:yesAsk,no_bid_cents:noBid,no_ask_cents:noAsk});
+function btcContracts(history,changes={}) {
+  const head=history.at(-1);
+  return {bitcoin_contracts:{status:'live',enabled:true,interval_seconds:10,stale_after_seconds:20,
+    last_checked_at:at(-1),last_success_at:head.at,recent:[],current:{id:'KXBTC15M-SYN1',title:'Bitcoin 15-minute contract',
+      comparison:'greater_or_equal',target_usd:'67654.32',open_at:at(-300),close_at:at(600),...head,observed_at:head.at,
+      http_date:at(-1),yes_ask_size:'12.40',no_ask_size:6,rules_primary:'Source rule <verified>',history},...changes}};
+}
+const contractsUI = {connected:true,locked:false,now:base};
+test('Bitcoin defaults to observed Kalshi odds with venue target, independent bid/ask moves and a real expiry', () => {
+  const snapshot=btcContracts([btcSidePoint(-10,54,56,44,46),btcSidePoint(0,56,58,42,44)]);
+  snapshot.bitcoin={quote:{mid_usd:999999},auto_enabled:true};
+  const html=bitcoinView(snapshot,contractsUI);
+  assert.match(html,/data-value="contracts" aria-selected="true"/);
+  assert.match(html,/Bitcoin at or above \$67,654\.32\?/);
+  assert.match(html,/YES ask<\/span><strong>58¢<\/strong>/);
+  assert.match(html,/NO ask<\/span><strong>44¢<\/strong>/);
+  assert.match(html,/\+2¢ since prior poll/); assert.match(html,/−2¢ since prior poll/);
+  assert.match(html,/12\.4 at ask/); assert.match(html,/2 book receipts/);
+  assert.match(html,/data-btc-countdown="2026-11-26T15:10:00\.000Z" aria-live="off">10:00/);
+  assert.match(html,/15:00:00 UTC/); assert.match(html,/Venue response 14:59:59 UTC/);
+  assert.match(html,/Source rule &lt;verified&gt;/);
+  assert.doesNotMatch(html,/999,999|Bitstamp|data-action="btc-auto"|data-action="btc-feed"|Strategy comparison/);
+  assert.equal(bitcoinCountdown(at(1),base+999),'00:01');
+  assert.equal(bitcoinCountdown(at(1),base+1000),'Closed');
+  assert.equal(bitcoinCountdown('missing',base),'—');
+});
+test('contract receipts keep individual missing sides, explicit failure and long gaps without inventing moves', () => {
+  const history=[btcSidePoint(-100,50,55,45,50),btcSidePoint(-90,50,54,46,50),{at:at(-80),kind:'gap'},
+    btcSidePoint(-70,50,54,46,50),btcSidePoint(-60,50,null,null,50),
+    btcSidePoint(-10,51,null,null,49),btcSidePoint(0,52,56,44,48)];
+  const snapshot=btcContracts(history,{status:'partial'});
+  let html=bitcoinView(snapshot,contractsUI);
+  assert.equal((html.match(/class="quote-line bid"/g)||[]).length,1);
+  assert.equal((html.match(/class="quote-point bid"/g)||[]).length,2);
+  assert.equal((html.match(/class="quote-line ask"/g)||[]).length,3);
+  assert.doesNotMatch(html,/\+2¢ since prior poll/);
+  assert.match(html,/−1¢ since prior poll/);assert.match(html,/Quote unavailable/);
+  html=bitcoinView(btcContracts([btcSidePoint(-30,30,35,65,70),btcSidePoint(0,40,45,55,60)]),contractsUI);
+  assert.doesNotMatch(html,/since prior poll|class="quote-line/);
+  html=bitcoinView(btcContracts([btcSidePoint(0,65,20,0,100)]),contractsUI);
+  assert.match(html,/YES ask<\/span><strong>—/);
+  assert.match(html,/NO ask<\/span><strong>—/);
+});
+test('unavailable, stale, disconnected and expired contracts never expose obsolete current odds', () => {
+  const sample=btcSidePoint(-1,59,61,39,41), snapshot=btcContracts([sample]);
+  const fresh=bitcoinView(snapshot,contractsUI);
+  assert.match(fresh,/YES ask<\/span><strong>61¢/);
+  for(const status of ['stale','offline','error','waiting','rate_limited']) {
+    const html=bitcoinView(btcContracts([sample],{status}),contractsUI);
+    assert.doesNotMatch(html,/YES ask<\/span><strong>61¢/);
+  }
+  const stale=bitcoinView(btcContracts([sample]),{...contractsUI,now:base+25000});
+  assert.match(stale,/Quotes delayed/);assert.doesNotMatch(stale,/YES ask<\/span><strong>61¢/);
+  assert.doesNotMatch(bitcoinView(snapshot,{...contractsUI,connected:false}),/YES ask<\/span><strong>61¢/);
+  const disabled=bitcoinView(btcContracts([sample],{enabled:false}),contractsUI);
+  assert.match(disabled,/public Kalshi market data/);assert.match(disabled,/data-action="kalshi-settings"/);
+  assert.doesNotMatch(disabled,/KXBTC15M-SYN1|61¢/);
+  const archived=snapshot.bitcoin_contracts.current;
+  const closed=bitcoinView(btcContracts([sample],{current:archived,recent:[archived]}),{...contractsUI,now:base+601000});
+  assert.match(closed,/Waiting for the next 15-minute contract/);assert.match(closed,/Previous windows/);
+  assert.match(closed,/Last YES ask/);assert.doesNotMatch(closed,/data-btc-countdown|YES ask<\/span><strong>/);
 });

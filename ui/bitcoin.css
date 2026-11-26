@@ -16,8 +16,8 @@
   gap:8px 16px;
   margin:12px 0 18px;
 }
-.btc-top-quote dt,.btc-account-lead dt,.btc-hold-mark dt { color:var(--muted);font-size:.81rem; }
-.btc-top-quote dd,.btc-account-lead dd,.btc-hold-mark dd {
+.btc-top-quote dt,.btc-account-lead dt,.btc-paired-dates dt { color:var(--muted);font-size:.81rem; }
+.btc-top-quote dd,.btc-account-lead dd,.btc-paired-dates dd {
   font-variant-numeric:tabular-nums;
   overflow-wrap:anywhere;
 }
@@ -33,13 +33,52 @@
 .btc-market .history-ranges dd { overflow-wrap:anywhere; }
 .btc-target { font-size:1.15rem;line-height:1.4;margin:0 0 10px; }
 .btc-note,.btc-empty { color:var(--muted);font-size:.84rem;line-height:1.5;max-width:85ch;overflow-wrap:anywhere; }
-.btc-note + .btc-note,.btc-hold-mark,.btc-workspace .field-list + .btc-note { margin-top:8px; }
+.btc-note + .btc-note,.btc-workspace .field-list + .btc-note { margin-top:8px; }
 .btc-compare { margin:8px 0 10px; }
 .btc-compare th,.btc-compare td { font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap; }
 .btc-compare th:first-child { text-align:left; }
-.btc-hold-mark { display:flex;flex-wrap:wrap;gap:8px 24px; }
-.btc-hold-mark>div { display:flex;flex-wrap:wrap;gap:3px 7px;align-items:baseline; }
-.btc-hold-mark dd { font-size:.86rem;font-weight:600; }
+.btc-paired-dates { display:flex;flex-wrap:wrap;gap:10px 40px;margin-bottom:15px; }
+.btc-paired-dates dd { margin-top:3px;font-size:.93rem;font-weight:600; }
+.btc-comparison .btc-note + .btc-note { margin-top:12px; }
+.btc-benchmark,.btc-contract-rules { border-top:1px solid var(--line);margin-top:14px; }
+.btc-benchmark summary,.btc-contract-rules summary { min-height:44px;padding-block:12px;cursor:pointer;font-size:.86rem; }
+.btc-contract-rules p { color:var(--muted);font-size:.84rem;margin:0 0 10px; }
+.btc-panel-tabs { display:flex;min-width:0;border-bottom:1px solid var(--line);margin:0 0 16px; }
+.btc-panel-tabs button { position:relative;min-height:48px;padding:9px 18px;color:var(--muted);font-size:.875rem;line-height:1.3; }
+.btc-panel-tabs button:hover { background:var(--soft);color:var(--ink); }
+.btc-panel-tabs button[aria-selected=true] { box-shadow:inset 0 -3px var(--blue);color:var(--ink);font-weight:600; }
+[id^=btc-view-]:focus-visible { outline:2px solid var(--blue);outline-offset:3px; }
+.btc-contract-status { border-top:0;margin-top:-6px; }
+.btc-contract-status span,.btc-current .panel-head p,.btc-receipt-line,.btc-time-left,.btc-odds-side { font-variant-numeric:tabular-nums; }
+.btc-current .panel-head { align-items:flex-start; }
+.btc-current .panel-head h2 { font-size:clamp(1.33rem,2.2vw,2rem);line-height:1.2;font-weight:400;letter-spacing:-.029em;overflow-wrap:anywhere; }
+.btc-current .panel-head p,.btc-receipt-line,.btc-odds-key { font-size:.8rem;color:var(--muted); }
+.btc-current .panel-head p { margin-top:6px;overflow-wrap:anywhere; }
+.btc-odds-strip { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:16px 20px 11px; }
+.btc-odds-strip > div { display:flex;flex-direction:column;min-width:0;align-items:flex-start; }
+.btc-odds-strip > div+div { border-left:1px solid var(--line);padding-left:clamp(14px,2vw,32px); }
+.btc-odds-strip > div > span:first-child { color:var(--muted);font-size:.88rem; }
+.btc-odds-strip strong { font-size:clamp(1.65rem,3vw,2.65rem);letter-spacing:-.05em;line-height:1.2;font-weight:400; }
+.btc-odds-bid,.btc-odds-strip small { color:var(--muted);font-size:.77rem;line-height:1.4; }
+.btc-odds-bid b { font-weight:600;color:var(--ink); }
+.btc-odds-strip small { margin-top:3px; }
+.btc-receipt-line { padding:0 20px 14px;overflow-wrap:anywhere; }
+.btc-contract-warning { padding:9px 20px;border-top:1px solid var(--line);color:#6e5105;background:#f9f6ed;font-size:.83rem; }
+.btc-contract-chart { container-type:inline-size; }
+.btc-odds-key { display:flex;flex-wrap:wrap;align-items:center;gap:5px 18px;margin:0 0 13px; }
+.btc-odds-key span { display:flex;align-items:center;gap:5px; }
+.btc-odds-key span:last-child { margin-left:auto; }
+.btc-contract-chart .btc-note { margin-top:9px; }
+.btc-source-links { display:flex;flex-wrap:wrap;gap:4px 16px; }
+.btc-source-links a,.btc-current .small-note a { display:inline-flex;align-items:center;gap:4px;min-height:44px; }
+.btc-book-receipts { font-variant-numeric:tabular-nums; }
+.btc-book-receipts td,.btc-book-receipts th { text-align:right; }
+.btc-book-receipts th:first-child { text-align:left; }
+.btc-recent-windows .btc-note { margin-bottom:7px; }
+.btc-contract-empty { padding:clamp(16px,3vw,32px); }
+.btc-contract-empty h2 { margin:0;font-size:1.35rem;font-weight:400; }
+.btc-contract-empty p { color:var(--muted);font-size:.925rem;margin-top:7px;max-width:68ch; }
+.btc-contract-empty .btn { margin-top:14px; }
 .btc-activity { list-style:none;padding:0; }
 .btc-activity li { display:grid;grid-template-columns:minmax(12rem,.55fr) minmax(0,2fr);gap:5px 14px;padding:8px 0;border-top:1px solid var(--line);font-size:.875rem;overflow-wrap:anywhere; }
 .btc-activity li:first-child { border:0;padding-top:0; }
@@ -49,6 +88,13 @@
 .options-coming p { font-size:.95rem;color:var(--muted);margin-top:6px; }
 @media (max-width:879px) { .btc-grid { grid-template-columns:minmax(0,1fr);gap:16px; } }
 @media (max-width:674px) { .btc-activity li { grid-template-columns:minmax(0,1fr); } }
+@media (max-width:620px) {
+  .btc-odds-strip { padding:13px 12px 10px;gap:9px 0;grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .btc-odds-strip > .btc-time-left { grid-column:1/-1;flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:3px 8px;padding:9px 0 0;border-left:0;border-top:1px solid var(--line); }
+  .btc-time-left strong { font-size:1.12rem;letter-spacing:-.02em;font-weight:600; }
+  .btc-receipt-line,.btc-contract-warning { padding-inline:12px; }
+  .btc-panel-tabs button { flex:1 1 0;min-width:0;padding-inline:6px;overflow-wrap:anywhere; }
+}
 @container (max-width:22rem) {
   .btc-market .chart-heading { align-items:flex-start;flex-direction:column; }
   .btc-market .bitcoin-plot { grid-template-columns:4.9rem minmax(0,1fr); }
@@ -62,4 +108,7 @@
   .btc-market .bitcoin-plot .quote-y-axis text { font-size:.59rem; }
   .btc-top-quote { grid-template-columns:minmax(0,1fr); }
   .btc-top-quote>div+div {padding:0;border:0}
+}
+@media (forced-colors:active) {
+  .btc-panel-tabs button[aria-selected=true] { border-bottom:3px solid Highlight; }
 }

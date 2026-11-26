@@ -1,6 +1,6 @@
 [package]
 name = "prediction-market-bot"
-version = "0.2.0"
+version = "0.2.1"
 description = "Prediction Market Bot paper research desktop"
 edition = "2021"
 build = "build.rs"

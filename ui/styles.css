@@ -377,7 +377,7 @@ input[aria-invalid=true]{border-bottom-color:var(--red)}
 .detail-tabs{flex-wrap:wrap}
 .detail-tabs button{max-width:100%;white-space:normal}
 .topbar{container-type:inline-size}
-@container (max-width:55rem){
+@container (max-width:76rem){
   .top-inner{display:grid;grid-template-columns:minmax(0,1fr) auto;height:auto;row-gap:0;padding:0}
   .brand{height:48px;padding:0 var(--edge);min-width:0}
   .paper-label{grid-column:2;grid-row:1;margin-right:var(--edge)}

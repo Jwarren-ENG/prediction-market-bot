@@ -2,26 +2,30 @@ import {button, connectionUrl, emptyBox, esc, headline, icon, reloadDisplayTimeZ
 import {detailTabs, researchView} from './research.js';
 import {defaultQuoteRange, marketsView, paperSwitch, quoteRanges, quoteRows} from './markets.js';
 import {activityView, connectionForm, modeLabel, portfolioView, workerView} from './views.js';
-import {bitcoinRanges, bitcoinView, optionsView} from './bitcoin.js';
+import {bitcoinCountdown, bitcoinRanges, bitcoinView, comparisonView, optionsView} from './bitcoin.js';
+import {isUtcDisplay, utcClock} from './time.js';
 
 const links = ['Markets', 'Research', 'Portfolio', 'Activity', 'Worker'];
 const titles = {Markets:'Markets', Research:'Research inbox', Portfolio:'Portfolio', Activity:'Activity', Worker:'Worker'};
 const narrow = window.matchMedia('(max-width: 879px)');
 const desks = {weather:'Central Park weather', bitcoin:'Bitcoin', options:'Options'};
-function savedDesk() {
-  try {
-    const value = localStorage.getItem('pmb.tradingWorkspace');
-    return Object.hasOwn(desks,value) ? value : 'weather';
-  } catch { return 'weather'; }
+function preference(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
 }
+function savePreference(key,value) { try { localStorage.setItem(key,value); } catch {} }
+const lastDesk = preference('pmb.tradingWorkspace');
 const ui = {
-  desk:savedDesk(), activityHours:24, btcRange:1440,
+  desk:Object.hasOwn(desks,lastDesk) ? lastDesk : 'weather', comparing:preference('pmb.topView') === 'compare',
+  btcPanel:preference('pmb.bitcoinPanel') === 'spot' ? 'spot' : 'contracts', activityHours:24, btcRange:1440,
   view:'Research', selected:null, filter:'All decisions', tab:'Decision', mobileDetail:false,
   quoteSelected:null, quoteMobileDetail:false, quoteRange:defaultQuoteRange, paperSwitchPending:false,
   activityFilter:'All events', provider:null, connectionError:'', busy:false,
   connected:false, contactError:'', actionError:'', success:'', locked:true, healthTone:'',
 };
 let state = null;
+let bitcoinState = null;
+let compareState = null;
+let workerHealth = null;
 let choseView = false;
 let order = [];
 let quoteOrder = [];
@@ -30,6 +34,7 @@ let pendingRead = null;
 let pendingToggle = null;
 let token = '';
 let successTimer;
+let lastClosedWindow = null;
 const el = id => document.getElementById(id);
 function tickClock() {
   const node = el('desk-clock');
@@ -37,6 +42,20 @@ function tickClock() {
   const now = new Date();
   node.dateTime = now.toISOString();
   node.textContent = wallClock(now);
+  const companion = el('utc-clock');
+  companion.dateTime = node.dateTime;
+  companion.textContent = utcClock(now);
+  el('utc-companion').hidden = isUtcDisplay();
+  let rollover = false;
+  for (const timer of document.querySelectorAll('[data-btc-countdown]')) {
+    const value = bitcoinCountdown(timer.dataset.btcCountdown,now.getTime());
+    if (value === 'Closed' && lastClosedWindow !== timer.dataset.btcCountdown) {
+      lastClosedWindow = timer.dataset.btcCountdown;
+      rollover = true;
+    }
+    if (timer.textContent !== value) timer.textContent = value;
+  }
+  if (rollover) { render();void refresh(); }
 }
 function readToken() {
   const url = new URL(location.href);
@@ -148,31 +167,36 @@ function announce(message) {
 }
 function notices() {
   const messages = [];
-  if (ui.contactError) messages.push(`<div class="notice error" data-key="connection" role="alert">${icon('warn',18)}<span>${esc(ui.contactError)}${state ? ' Showing the last received snapshot.' : ''}</span>${button('Retry connection','retry',{kind:'inline'})}</div>`);
+  const visibleState = ui.comparing ? compareState : ui.desk === 'weather' ? state : ui.desk === 'bitcoin' ? bitcoinState : null;
+  if (ui.contactError) messages.push(`<div class="notice error" data-key="connection" role="alert">${icon('warn',18)}<span>${esc(ui.contactError)}${visibleState ? ' Showing the last received snapshot.' : ''}</span>${button('Retry connection','retry',{kind:'inline'})}</div>`);
   if (ui.actionError) messages.push(`<div class="notice error" data-key="action" role="alert">${icon('warn',18)}<span>${esc(ui.actionError)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
-  if (ui.desk === 'weather' && state?.paused) messages.push(`<div class="notice warn" data-key="pause">${icon('pause',16)}<span><strong>Paper entries paused.</strong> ${esc(state.risk_pause_reason || 'Existing paper positions remain in the portfolio.')}</span></div>`);
+  if (!ui.comparing && ui.desk === 'weather' && state?.paused) messages.push(`<div class="notice warn" data-key="pause">${icon('pause',16)}<span><strong>Paper entries paused.</strong> ${esc(state.risk_pause_reason || 'Existing paper positions remain in the portfolio.')}</span></div>`);
   if (ui.success) messages.push(`<div class="notice success" data-key="success" role="status">${icon('check',16)}<span>${esc(ui.success)}</span>${button('Dismiss','dismiss',{kind:'inline'})}</div>`);
   return messages.join('');
 }
 function render() {
   const previous = document.activeElement;
   ui.locked = ui.busy || !ui.connected;
-  const late = state?.health?.heartbeat && Date.now() - new Date(state.health.heartbeat).getTime() > 180000;
+  const late = workerHealth?.heartbeat && Date.now() - new Date(workerHealth.heartbeat).getTime() > 180000;
   ui.healthTone = !ui.connected ? 'offline' : late ? 'late' : 'connected';
   const weather = ui.desk === 'weather';
   el('strategy-desk').value = ui.desk;
-  el('navigation').hidden = !weather;
-  paint('navigation',weather ? links.map(name => `<button type="button" data-action="view" data-value="${name}" data-key="nav-${name}"${ui.view === name ? ' aria-current="page"' : ''}>${icon(name.toLowerCase(),17)}<span>${name}</span></button>`).join('') : '');
-  document.title = `${weather ? titles[ui.view] : desks[ui.desk]} · Prediction Market Bot`;
+  const navItem = (title,action,value,glyph,active) => `<button type="button" data-action="${action}" data-value="${value}" data-key="nav-${value}"${active ? ' aria-current="page"' : ''}>${icon(glyph,17)}<span>${title}</span></button>`;
+  const navigation = weather ? links.map(name => navItem(name,'view',name,name.toLowerCase(),!ui.comparing && name === ui.view)) :
+    [navItem(desks[ui.desk],'workspace',ui.desk,'markets',!ui.comparing)];
+  navigation.push(navItem('Compare','compare','compare','layers',ui.comparing));
+  paint('navigation',navigation.join(''));
+  document.title = `${ui.comparing ? 'Compare' : weather ? titles[ui.view] : desks[ui.desk]} · Prediction Market Bot`;
   paint('notices',notices());
   let html;
-  if (ui.desk === 'options') html = optionsView(state,ui);
-  else if (!state) {
-    const label = ui.contactError ? 'Connect to a research worker' : 'Connecting to the research worker';
-    const switchControl = weather && ['Markets','Research'].includes(ui.view) ? paperSwitch(null,ui) : '';
-    html = `${headline(label,'Private paper workspace',switchControl)}<div class="connection-panel panel"><div class="panel-body">${ui.contactError ? connectionForm(ui) : emptyBox('Waiting for a snapshot','The worker owns the research feed and the paper account.','worker')}</div></div>`;
-  } else if (ui.desk === 'bitcoin') html = bitcoinView(state,ui);
-  else if (ui.view === 'Markets') {
+  if (ui.comparing && compareState) html = comparisonView(compareState,ui);
+  else if (!ui.comparing && ui.desk === 'options') html = optionsView(null,ui);
+  else if (!ui.comparing && ui.desk === 'bitcoin' && bitcoinState) html = bitcoinView(bitcoinState,ui);
+  else if (ui.comparing || !weather || !state) {
+    const label = ui.comparing ? 'Compare' : !weather ? desks[ui.desk] : ui.contactError ? 'Connect to a research worker' : 'Connecting to the research worker';
+    const switchControl = !ui.comparing && weather && ['Markets','Research'].includes(ui.view) ? paperSwitch(null,ui) : '';
+    html = `${headline(label,'Private paper workspace',switchControl)}<div class="connection-panel panel"><div class="panel-body">${ui.contactError ? connectionForm(ui) : emptyBox('Waiting for a snapshot',ui.comparing ? 'Reading the shared portfolio marks.' : !weather ? 'Reading the latest Bitcoin market observations.' : 'Reading weather research and the paper account.','worker')}</div></div>`;
+  } else if (ui.view === 'Markets') {
     const rank = new Map(quoteOrder.map((id,i)=>[id,i]));
     const quotes = quoteRows(state,ui.connected).sort((a,b)=>rank.get(a.id)-rank.get(b.id));
     if (!quotes.some(m => m.id === ui.quoteSelected)) {
@@ -186,9 +210,10 @@ function render() {
   else if (ui.view === 'Activity') html = activityView(state,ui);
   else html = workerView(state,ui);
   paint('workspace',html);
-  const status = !state && !ui.contactError ? 'Connecting' : !ui.connected ? 'Worker disconnected' : late ? 'Heartbeat overdue' : 'Worker connected';
+  const status = !workerHealth && !ui.contactError ? 'Connecting' : !ui.connected ? 'Worker disconnected' : late ? 'Heartbeat overdue' : 'Worker connected';
+  const footer = ui.comparing ? 'Paper portfolios' : weather ? (state ? modeLabel(state) + (state.paused ? ' · Entries paused' : '') : 'Weather') : ui.desk === 'bitcoin' ? 'Bitcoin' : 'Options · Coming soon';
   paint('statusbar',`<div class="status-inner"><span class="connection-status"><i class="state-symbol ${ui.healthTone}" aria-hidden="true"></i>${status}</span>
-    ${state ? `<span class="footer-mode">${weather ? esc(modeLabel(state)) + (state.paused ? ' · Entries paused' : '') : ui.desk === 'bitcoin' ? 'Bitcoin paper' : 'Options · Coming soon'}</span><span class="footer-heartbeat">Heartbeat <time>${esc(stamp(state.health.heartbeat))}</time></span>` : ''}</div>`);
+    ${workerHealth ? `<span class="footer-mode">${esc(footer)}</span><span class="footer-heartbeat">Heartbeat <time>${esc(stamp(workerHealth.heartbeat))}</time></span>` : ''}</div>`);
   if (previous && previous !== document.body && document.activeElement === document.body) {
     const fallback = previous.isConnected ? previous : ui.view === 'Markets' ? document.querySelector('.quote-link[aria-pressed="true"]') || el('view-title') :
       ui.view === 'Research' && el('decision-filter') ? el('decision-filter') : el('view-title');
@@ -231,10 +256,20 @@ async function refresh(force = false) {
   const controller = new AbortController();
   pendingRead = controller;
   try {
-    const query = ui.desk === 'bitcoin' ? '?workspace=bitcoin' : ui.desk === 'weather' && ui.view === 'Activity' ? `?activity_hours=${ui.activityHours}` : '';
-    const next = await api('/api/state'+query,{controller});
+    const desk = ui.comparing ? 'comparison' : ui.desk;
+    const route = desk === 'weather' ? 'state' + (ui.view === 'Activity' ? `?activity_hours=${ui.activityHours}` : '') : desk === 'options' ? 'status' : desk;
+    const next = await api('/api/'+route,{controller});
     if (version !== requestVersion) return false;
-    selectData(next);
+    if (!next?.health?.heartbeat) throw new Error('The worker returned an incomplete snapshot.');
+    if (desk === 'weather') selectData(next);
+    else if (desk === 'bitcoin') {
+      if (!next.bitcoin?.portfolio || !next.bitcoin_contracts) throw new Error('Bitcoin market data is unavailable.');
+      bitcoinState = next;
+    } else if (desk === 'comparison') {
+      if (!next.comparison?.accounts) throw new Error('Portfolio comparison data is unavailable.');
+      compareState = next;
+    }
+    workerHealth = next.health;
     ui.contactError = '';
     ui.connected = true;
     return true;
@@ -275,7 +310,7 @@ async function action(name, value) {
     accepted = true;
     if (await refresh(true)) {
       if (name !== 'scan') {
-        const paused = value?.source === 'markets' ? !state.paper_automation?.enabled : state.paused;
+        const paused = value?.source === 'markets' ? !state?.paper_automation?.enabled : state?.paused;
         ui.success = name === 'resume' ? paused ? 'The worker rechecked risk. Paper entries remain paused.' : 'Paper entries resumed.' : confirmations[name];
       }
       clearTimeout(successTimer);
@@ -290,6 +325,10 @@ async function action(name, value) {
 }
 function navigate(view) {
   if (!links.includes(view)) return;
+  const returning = ui.comparing || ui.desk !== 'weather';
+  ui.comparing = false;
+  ui.desk = 'weather';
+  savePreference('pmb.tradingWorkspace',ui.desk);savePreference('pmb.topView','desk');
   choseView = true;
   if (view === 'Research' && state) order = state.markets.map(m => m.id);
   ui.view = view;
@@ -299,7 +338,19 @@ function navigate(view) {
   render();
   window.scrollTo(0,0);
   el('view-title')?.focus({preventScroll:true});
-  if (view === 'Activity') void refresh(true);
+  if (returning || view === 'Activity') void refresh(true);
+}
+function switchWorkspace(desk,compare=false) {
+  if (!Object.hasOwn(desks,desk)) return;
+  ui.desk=desk;ui.comparing=compare;ui.actionError='';ui.success='';
+  savePreference('pmb.tradingWorkspace',desk);savePreference('pmb.topView',compare ? 'compare' : 'desk');
+  render();announce(compare ? 'Compare portfolios' : `${desks[desk]} workspace`);
+  window.scrollTo(0,0);void refresh(true);
+}
+function selectBitcoinPanel(value,focus=false) {
+  if (!['contracts','spot'].includes(value)) return;
+  ui.btcPanel=value;savePreference('pmb.bitcoinPanel',value);render();tickClock();
+  if (focus) document.querySelector(`[data-action="btc-panel"][data-value="${value}"]`)?.focus();
 }
 function choose(id, open = true) {
   if (!state?.markets.some(m => m.id === id)) return;
@@ -372,6 +423,10 @@ document.addEventListener('click',event => {
   if (clickable.disabled) return;
   const {action:name,value} = clickable.dataset;
   if (name === 'view') navigate(value);
+  else if (name === 'compare') switchWorkspace(ui.desk,true);
+  else if (name === 'workspace') switchWorkspace(value);
+  else if (name === 'btc-panel') selectBitcoinPanel(value);
+  else if (name === 'kalshi-settings') navigate('Worker');
   else if (name === 'btc-range' && bitcoinRanges.has(Number(value))) { ui.btcRange = Number(value);render(); }
   else if (['btc-feed','btc-auto'].includes(name) && ['true','false'].includes(value)) void action(name,value === 'true');
   else if (name === 'activity-range' && [24,48,168].includes(Number(value))) {
@@ -419,11 +474,7 @@ document.addEventListener('change',event => {
   const field = event.target;
   switch (field.id) {
     case 'strategy-desk':
-      if (!Object.hasOwn(desks,field.value)) break;
-      ui.desk = field.value;
-      try { localStorage.setItem('pmb.tradingWorkspace',ui.desk); } catch {}
-      ui.actionError = '';ui.success = '';
-      render();announce(`${desks[ui.desk]} workspace`);window.scrollTo(0,0);void refresh(true);break;
+      switchWorkspace(field.value);break;
     case 'decision-filter':
       ui.filter = field.value;
       order = state.markets.map(m => m.id);
@@ -455,6 +506,11 @@ document.addEventListener('keydown',event => {
   const target = event.target;
   if (target.matches('[role="tab"]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) {
     event.preventDefault();
+    if (target.dataset.action === 'btc-panel') {
+      const next = event.key === 'Home' ? 'contracts' : event.key === 'End' ? 'spot' : (ui.btcPanel === 'spot' ? 'contracts' : 'spot');
+      selectBitcoinPanel(next,true);
+      return;
+    }
     const pos = detailTabs.indexOf(ui.tab);
     const idx = event.key === 'Home' ? 0 : event.key === 'End' ? detailTabs.length - 1 : (pos + (event.key === 'ArrowRight' ? 1 : -1) + detailTabs.length) % detailTabs.length;
     showTab(detailTabs[idx],true);

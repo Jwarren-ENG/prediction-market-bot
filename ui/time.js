@@ -45,6 +45,8 @@ export function reloadDisplayTimeZone() {
 reloadDisplayTimeZone();
 export const displayTimeZone = () => selection;
 export const wallClock = (value = Date.now()) => formats.wall.format(value);
+export const utcClock = (value = Date.now()) => new Date(value).toISOString().slice(11,19) + ' UTC';
+export const isUtcDisplay = () => ['UTC','Etc/UTC','Etc/GMT','GMT'].includes(formats.wall.resolvedOptions().timeZone);
 export function zoneLabel(value = Date.now()) {
   const date = instant(value) || new Date();
   return formats.zone.formatToParts(date).find(part => part.type === 'timeZoneName')?.value || formats.zone.resolvedOptions().timeZone;

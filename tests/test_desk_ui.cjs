@@ -51,6 +51,19 @@ test('time zone setting survives reload, an invalid preference restores Eastern'
   assert.equal(time.displayTimeZone(), 'America/New_York');
 });
 
+test('header UTC and selected zone use a common instant through DST and midnight', () => {
+  time.setDisplayTimeZone('America/New_York');
+  assert.equal(time.isUtcDisplay(),false);
+  const instant=new Date('2026-11-26T21:13:55Z');
+  assert.match(time.wallClock(instant),/4:13:55 PM EST/);
+  assert.equal(time.utcClock(instant),'21:13:55 UTC');
+  const summer=new Date('2026-07-05T00:01:02Z');
+  assert.match(time.wallClock(summer),/8:01:02 PM EDT/);
+  assert.equal(time.utcClock(summer),'00:01:02 UTC');
+  time.setDisplayTimeZone('UTC');
+  assert.equal(time.isUtcDisplay(),true);
+});
+
 test('scans spin while running and report the actual durable result', () => {
   const render = (status, ui = {}) => scanButton({health:{scan:{id:'one',status,finished_at:status === 'running' ? null : '2025-01-01T00:00:00Z'}}}, ui);
   assert.match(render('running'), /scan-in-progress/);

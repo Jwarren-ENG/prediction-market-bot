@@ -28,7 +28,13 @@
         </label>
       </div>
       <nav id="navigation" aria-label="Workspace"></nav>
-      <div class="paper-label"><span class="paper-mode-label"><span class="paper-icon" aria-hidden="true"></span>Paper trading</span><time id="desk-clock" aria-live="off" title="Current time · change time zone in Worker settings"></time></div>
+      <div class="paper-label">
+        <span class="paper-mode-label"><span class="paper-icon" aria-hidden="true"></span>Paper trading</span>
+        <div class="desk-clocks" aria-live="off">
+          <time id="desk-clock" title="Display time zone · change in Worker settings"></time>
+          <span id="utc-companion"><span class="clock-divider" aria-hidden="true"> · </span><time id="utc-clock" title="Coordinated Universal Time"></time></span>
+        </div>
+      </div>
     </div>
   </header>
   <main id="main" class="workspace" tabindex="-1">
