@@ -26,6 +26,8 @@ API = "https://external-api.kalshi.com/trade-api/v2"
 NWS = "https://api.weather.gov"
 POINT = NWS + "/points/40.7833,-73.9667"
 OBS = NWS + "/stations/KNYC/observations/latest"
+METAR = "https://aviationweather.gov/api/data/metar?ids=KNYC&format=json"
+METAR_TTL = 300
 CLIS = NWS + "/products/types/CLI/locations/NYC"
 NBM = "https://noaa-nbm-grib2-pds.s3.amazonaws.com"
 SERIES = API + "/series/KXHIGHNY"
@@ -41,7 +43,7 @@ OPEN = API + "/markets?series_ticker=KXHIGHNY&status=open&limit=100"
 RECENT = API + "/markets?series_ticker=KXHIGHNY&status=settled&limit=12"
 BOOK_TTL = 60
 MAX_ERRORS = 12
-ALLOWED_HOSTS = {urlsplit(u).hostname for u in (API, NWS, NBM, TERMS)}
+ALLOWED_HOSTS = {urlsplit(u).hostname for u in (API, NWS, NBM, TERMS, METAR)}
 VENUE_HOSTS = {urlsplit(u).hostname for u in (API, TERMS)}
 SAFE_ERRORS = (
     ValueError,
@@ -185,7 +187,8 @@ def database(data_dir):
     db = sqlite3.connect(data_dir / "feeds.sqlite3", timeout=10)
     db.row_factory = sqlite3.Row
     wx.initialize(db)
-    db.executescript("""
+    db.executescript(
+        """
         CREATE TABLE IF NOT EXISTS cache(
             name TEXT PRIMARY KEY, seen TEXT, value TEXT);
         CREATE TABLE IF NOT EXISTS market_registry(
@@ -198,7 +201,8 @@ def database(data_dir):
         CREATE TABLE IF NOT EXISTS exceptional_results(
             id TEXT, resolved TEXT, seen TEXT, source TEXT, payout TEXT,
             PRIMARY KEY(id,resolved,payout));
-    """)
+    """
+    )
     return db
 
 
@@ -206,6 +210,7 @@ class Cycle:
     def __init__(self, db, permission_check=None):
         self.db = db
         self.errors = []
+        self.aviation_note = ""
         self.permission_check = permission_check
 
     def require_permission(self):
@@ -340,6 +345,25 @@ def gather_weather(cycle):
     cycle.attempt("KNYC observation", observation)
     cycle.attempt("CLINYC product list", climate)
     cycle.attempt("NOAA NBM", lambda: gather_nbm(cycle))
+    gather_metar(cycle)
+
+
+def gather_metar(cycle):
+    # This additional delivery channel is observational context. Its failure
+    # cannot change the forecast, trading eligibility or venue reconciliation.
+    cached = cycle.cache(METAR, METAR_TTL)
+    if cached is not None:
+        cycle.aviation_note = cached["note"]
+        return
+    try:
+        reply = cycle.get(METAR, max_bytes=32_768)
+        data = [] if reply.status == 204 else json.loads(reply.body)
+        if not isinstance(data, list) or len(data) != 1:
+            raise ValueError("No single current KNYC station report.")
+        wx.read_metar(cycle.db, data[0], METAR, reply.seen)
+    except (Unavailable, *SAFE_ERRORS) as exc:
+        cycle.aviation_note = f"Optional NOAA aviation report unavailable ({exc})."
+    cycle.save(METAR, {"note": cycle.aviation_note})
 
 
 def gather_nbm(cycle):
@@ -1112,6 +1136,8 @@ def gather_venue(cycle):
         status = "Feed degraded. " + " | ".join(dict.fromkeys(cycle.errors))
     if exceptional:
         status += " Exceptional venue payouts remain pending in the paper account."
+    if cycle.aviation_note:
+        status += " " + cycle.aviation_note
     return {
         "packets": packets,
         "settlements": settlements,
@@ -1167,6 +1193,8 @@ def collect(
                 status = str(exc) + " The unfinished venue scan was discarded."
         if weather_errors:
             status += " " + " | ".join(weather_errors)
+        if cycle.aviation_note:
+            status += " " + cycle.aviation_note
         return {
             "packets": [],
             "settlements": [],

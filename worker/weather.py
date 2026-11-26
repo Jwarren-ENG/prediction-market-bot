@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 UTC = timezone.utc
 STATION = "KNYC"
+AWC_MODEL = "NOAA Aviation Weather Center KNYC METAR"
+METAR_MAX_AGE = timedelta(hours=2)
 AUTHORITY = "CLINYC/The Weather Company/GLOBALTEMPERATURE"
 MODEL = "KNYC empirical error v1"
 MIN_DAYS = 30
@@ -90,7 +92,8 @@ def evidence(title, url, published, available, detail, **extra):
 
 
 def initialize(db: sqlite3.Connection):
-    db.executescript("""
+    db.executescript(
+        """
         CREATE TABLE IF NOT EXISTS weather_records(
             kind TEXT, event_day TEXT, model TEXT, issued TEXT, first_seen TEXT,
             published TEXT, url TEXT, value REAL, detail TEXT, digest TEXT, artifact TEXT,
@@ -102,7 +105,8 @@ def initialize(db: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS estimates(
             market_id TEXT, as_of TEXT, rule_version TEXT, estimate TEXT,
             PRIMARY KEY(market_id,as_of,rule_version));
-    """)
+    """
+    )
 
 
 def save(
@@ -214,6 +218,86 @@ def read_observation(db, data, url, seen):
             "temperature": reading,
             "station": props["station"],
         },
+        published=None,
+    )
+
+
+def read_metar(db, report, source, seen):
+    """Archive one NOAA relay of the Central Park sensor, preserving local first receipt."""
+    if not isinstance(report, dict) or report.get("icaoId") != STATION:
+        raise ValueError("Aviation report has the wrong station.")
+    timestamp = report.get("obsTime")
+    if type(timestamp) is not int or not 0 < timestamp <= seen.timestamp():
+        raise ValueError("Aviation observation time is missing or in the future.")
+    observed = datetime.fromtimestamp(timestamp, UTC)
+    try:
+        received = instant(report.get("receiptTime"))
+    except ValueError as exc:
+        raise ValueError("Aviation provider receipt time is invalid.") from exc
+    if not observed <= received <= seen:
+        raise ValueError("Aviation receipt and observation times disagree.")
+    if seen - observed > METAR_MAX_AGE:
+        raise ValueError("The latest KNYC aviation report is over two hours old.")
+    kind = report.get("metarType")
+    raw = report.get("rawOb")
+    if kind not in {"METAR", "SPECI"} or not isinstance(raw, str) or len(raw) > 1500:
+        raise ValueError("Unrecognized KNYC aviation report.")
+    raw = " ".join(raw.split())
+    if not re.match(rf"^(?:{kind} )?KNYC {observed:%d%H%M}Z(?: |$)", raw):
+        raise ValueError("Raw aviation report station or observation time disagrees.")
+    celsius = report.get("temp")
+    if type(celsius) not in (float, int) or not -60 <= celsius <= 60:
+        raise ValueError("Aviation report lacks a usable Celsius temperature.")
+    # A retransmission may update the provider's receipt time for the same raw
+    # observation. A corrected raw report at the same measured time is distinct.
+    if db.execute(
+        """SELECT 1 FROM weather_records WHERE kind='observation' AND model=? AND issued=?
+           AND json_extract(artifact,'$.rawOb')=? LIMIT 1""",
+        (AWC_MODEL, iso(observed), raw),
+    ).fetchone():
+        return
+    fahrenheit = round(celsius * 9 / 5 + 32, 1)
+    detail = [
+        f"{'Special SPECI' if kind == 'SPECI' else 'Routine METAR'} report from Central Park measured "
+        f"{fahrenheit:g}°F at {observed:%Y-%m-%d %H:%M UTC}."
+    ]
+    speed, gust = report.get("wspd"), report.get("wgst")
+    if type(speed) in (int, float) and 0 <= speed <= 250:
+        wind = f"Wind {speed:g} kt"
+        if type(gust) in (int, float) and speed <= gust <= 300:
+            wind += f", gusting to {gust:g} kt"
+        detail.append(wind + ".")
+    detail.append(
+        f"NOAA Aviation received it at {received:%H:%M:%S UTC}. "
+        "This is the same KNYC sensor used by the NWS station feed."
+    )
+    # reportTime can be a nominal hour after receipt for routine METARs.
+    # Neither it nor NOAA's upstream receipt establishes a publication time.
+    artifact = {
+        k: report.get(k)
+        for k in (
+            "icaoId",
+            "obsTime",
+            "receiptTime",
+            "reportTime",
+            "metarType",
+            "temp",
+            "wspd",
+            "wgst",
+        )
+    }
+    artifact["rawOb"] = raw
+    save(
+        db,
+        "observation",
+        eastern(observed).date(),
+        AWC_MODEL,
+        observed,
+        seen,
+        source + "&date=" + observed.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        fahrenheit,
+        " ".join(detail),
+        artifact,
         published=None,
     )
 
@@ -349,10 +433,32 @@ def records(db, asof, day=None, limit=12):
             (iso(asof), limit),
         )
     else:
+        # For tomorrow's contract the latest station report describes conditions
+        # today. Keep its actual event date and prefer one record per source
+        # before filling remaining slots with older records.
+        newest = iso(asof - METAR_MAX_AGE)
+        today = eastern(asof).date()
+        include_today = str(day) == str(today + timedelta(days=1))
         rows = db.execute(
-            """SELECT * FROM weather_records WHERE first_seen<=? AND event_day=?
-            ORDER BY issued DESC, first_seen DESC LIMIT ?""",
-            (iso(asof), str(day), limit),
+            """WITH dated AS (
+            SELECT *,ROW_NUMBER() OVER (PARTITION BY kind,model ORDER BY issued DESC,first_seen DESC) rank
+            FROM weather_records WHERE first_seen<=? AND
+                ((event_day=? AND (model<>? OR issued>=?))
+                 OR (? AND event_day=? AND model=? AND issued>=?)))
+            SELECT * FROM dated WHERE model<>? OR rank=1
+            ORDER BY rank,issued DESC,first_seen DESC LIMIT ?""",
+            (
+                iso(asof),
+                str(day),
+                AWC_MODEL,
+                newest,
+                include_today,
+                str(today),
+                AWC_MODEL,
+                newest,
+                AWC_MODEL,
+                limit,
+            ),
         )
     labels = {
         "forecast": "Issued forecast",
@@ -362,7 +468,11 @@ def records(db, asof, day=None, limit=12):
     }
     return [
         evidence(
-            labels[r["kind"]],
+            (
+                "NOAA Aviation Weather Center · KNYC"
+                if r["model"] == AWC_MODEL
+                else labels[r["kind"]]
+            ),
             r["url"],
             r["published"],
             r["first_seen"],
@@ -372,6 +482,14 @@ def records(db, asof, day=None, limit=12):
             issued_at=r["issued"],
             context_only=r["kind"] != "forecast",
             sha256=r["digest"],
+            **(
+                {
+                    "source_received_at": json.loads(r["artifact"])["receiptTime"],
+                    "station": STATION,
+                }
+                if r["model"] == AWC_MODEL
+                else {}
+            ),
         )
         for r in rows
     ]

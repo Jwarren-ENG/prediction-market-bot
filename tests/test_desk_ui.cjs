@@ -1,6 +1,31 @@
 const {test, before, afterEach} = require('node:test');
 const assert = require('node:assert/strict');
 
+test('daily activity collapses only matching decisions and retains contract receipts', async () => {
+  const {groupReceipts,receiptRows,historyPanel} = await import('../ui/activity-history.js');
+  const row = (id,kind,at,message) => ({id,kind,at,message,market_id:id});
+  const rows = [row('alpha','decision',1,'Watch. Needs history.'), row('beta','decision',1,'Watch. Needs history.'),
+    row('gamma','decision',2,'Watch. Needs history.'),row('fill','fill',1,'Bought 2')];
+  assert.deepEqual(groupReceipts(rows).map(g=>g.length),[2,1,1]);
+  const html = receiptRows(rows,new Map()).join('');
+  for (const id of ['alpha','beta','gamma','fill']) assert.ok(html.includes(id));
+  const result = historyPanel({hours:24,bin_seconds:3600,start_at:60000,end_at:86460000,
+    decisions:{counts:Array(24).fill(2)},scans:{counts:Array(24).fill(3)}},24);
+  assert.match(result,/48<\/strong>/);
+  assert.match(result,/72<\/strong>/);
+  assert.match(result,/View interval counts/);
+  assert.match(historyPanel(null,168),/Loading recorded activity/);
+});
+
+test('event filter stays visible when a shorter activity window has no matching receipts', async () => {
+  const {activityView} = await import('../ui/views.js');
+  const state = {mode:'replay', activity:[], markets:[], activity_history:{
+    hours:24, start_at:60000, end_at:86460000, bin_seconds:3600, decisions:{counts:Array(24).fill(0)}}};
+  const html = activityView(state,{activityHours:24,activityFilter:'fill'});
+  assert.match(html,/<option value="fill" selected>Fill<\/option>/);
+  assert.match(html,/No matching events/);
+});
+
 let time, scanButton, latestPriceMoves;
 before(async () => {
   time = await import('../ui/time.js');
@@ -33,6 +58,19 @@ test('time zone setting survives reload, an invalid preference restores Eastern'
   saved.set('pmb.displayTimeZone','missing/place');
   time.reloadDisplayTimeZone();
   assert.equal(time.displayTimeZone(), 'America/New_York');
+});
+
+test('header UTC and selected zone use a common instant through DST and midnight', () => {
+  time.setDisplayTimeZone('America/New_York');
+  assert.equal(time.isUtcDisplay(),false);
+  const instant=new Date('2026-11-26T21:13:55Z');
+  assert.match(time.wallClock(instant),/4:13:55 PM EST/);
+  assert.equal(time.utcClock(instant),'21:13:55 UTC');
+  const summer=new Date('2026-07-05T00:01:02Z');
+  assert.match(time.wallClock(summer),/8:01:02 PM EDT/);
+  assert.equal(time.utcClock(summer),'00:01:02 UTC');
+  time.setDisplayTimeZone('UTC');
+  assert.equal(time.isUtcDisplay(),true);
 });
 
 test('scans spin while running and report the actual durable result', () => {

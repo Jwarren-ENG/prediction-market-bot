@@ -45,16 +45,12 @@ def market(day=date(2026, 11, 28), strike="between"):
         "close_time": w.iso(w.event_end(day) + timedelta(hours=1)),
         "status": "active",
         "strike_type": strike,
-        "floor_strike": low
-        if strike == "between"
-        else high
-        if strike == "greater"
-        else None,
-        "cap_strike": high
-        if strike == "between"
-        else low
-        if strike == "less"
-        else None,
+        "floor_strike": (
+            low if strike == "between" else high if strike == "greater" else None
+        ),
+        "cap_strike": (
+            high if strike == "between" else low if strike == "less" else None
+        ),
     }
 
 
@@ -97,6 +93,20 @@ class SyntheticSources:
         self.lookup = {}
         self.block = None
         self.overrides = []
+        obs = NOW - timedelta(minutes=9)
+        self.aviation = [
+            {
+                "icaoId": "KNYC",
+                "metarType": "SPECI",
+                "obsTime": int(obs.timestamp()),
+                "reportTime": w.iso(obs),
+                "receiptTime": w.iso(obs + timedelta(seconds=73)),
+                "rawOb": f"SPECI KNYC {obs:%d%H%M}Z AUTO 01012G22KT 10SM 07/02 A3001",
+                "temp": 7.2,
+                "wspd": 12,
+                "wgst": 22,
+            }
+        ]
 
     def __call__(self, url, **options):
         self.calls.append(url)
@@ -141,6 +151,10 @@ class SyntheticSources:
                     },
                 }
             }
+        elif url == f.METAR:
+            if not self.aviation:
+                return f.Reply(b"", n, n, None, status=204)
+            data = self.aviation
         elif url == f.CLIS:
             data = {
                 "@graph": [
@@ -225,7 +239,9 @@ class SourceTests(unittest.TestCase):
         first = self.poll(False)
         self.assertFalse(first["packets"])
         self.assertFalse(first["settlements"])
-        self.assertTrue(all(u.startswith((f.NBM, f.NWS)) for u in self.src.calls))
+        self.assertTrue(
+            all(u.startswith((f.NBM, f.NWS)) or u == f.METAR for u in self.src.calls)
+        )
         obs = next(x for x in first["evidence"] if x["kind"] == "observation")
         self.assertIsNone(obs["published_at"])
         with closing(f.database(self.path)) as db:
@@ -247,6 +263,76 @@ class SourceTests(unittest.TestCase):
                 ).fetchone()[0],
                 2,
             )
+
+    def test_aviation_relay_preserves_measurement_availability_and_same_station(self):
+        first = self.poll()
+        aviation = next(v for v in first["evidence"] if v.get("station") == "KNYC")
+        self.assertEqual(aviation["issued_at"], self.src.aviation[0]["reportTime"])
+        self.assertEqual(
+            aviation["source_received_at"], self.src.aviation[0]["receiptTime"]
+        )
+        self.assertIsNone(aviation["published_at"])
+        self.assertEqual(aviation["available_at"], w.iso(NOW))
+        self.assertIn("same KNYC sensor", aviation["detail"])
+        self.assertIn("gusting to 22 kt", aviation["detail"])
+        self.assertTrue(aviation["context_only"])
+        packet = first["packets"][0]
+        self.assertIn(aviation, packet["evidence"])
+        self.assertNotEqual(aviation["event_date"], packet["event_date"])
+        self.src.now += timedelta(seconds=30)
+        self.poll()
+        self.assertEqual(self.src.calls.count(f.METAR), 1)
+        self.src.aviation[0]["receiptTime"] = w.iso(self.src.now)
+        self.src.now += timedelta(minutes=5)
+        self.poll()
+        with closing(f.database(self.path)) as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT count(*) FROM weather_records WHERE model=?", (w.AWC_MODEL,)
+                ).fetchone()[0],
+                1,
+            )
+            self.assertFalse(
+                any(e.get("station") for e in w.records(db, NOW - timedelta(seconds=1)))
+            )
+        self.assertEqual(self.src.calls.count(f.METAR), 2)
+
+    def test_missing_or_late_aviation_context_does_not_stop_other_feeds(self):
+        self.src.aviation.clear()
+        optional = self.poll()
+        self.assertIn("Optional NOAA aviation report unavailable", optional["status"])
+        self.assertFalse(optional["degraded"])
+        self.assertTrue(optional["packets"][0]["book_executable"])
+        self.assertTrue(any(v["kind"] == "forecast" for v in optional["evidence"]))
+        self.assertFalse(any(v.get("station") for v in optional["evidence"]))
+
+    def test_aviation_special_or_routine_validation_and_soft_failure(self):
+        item = self.src.aviation[0]
+        with closing(f.database(self.path)) as db:
+            for update in (
+                {"icaoId": "KLGA"},
+                {"obsTime": int(NOW.timestamp()) + 10},
+                {"receiptTime": w.iso(NOW + timedelta(minutes=1))},
+                {"receiptTime": "bad time"},
+                {"obsTime": int((NOW - timedelta(hours=4)).timestamp())},
+                {"rawOb": "METAR KLGA 271851Z AUTO"},
+                {"temp": float("nan")},
+            ):
+                with self.subTest(update=update), self.assertRaises(ValueError):
+                    w.read_metar(db, {**item, **update}, f.METAR, NOW)
+            routine = {
+                **item,
+                "metarType": "METAR",
+                "rawOb": item["rawOb"].replace("SPECI ", ""),
+                "reportTime": w.iso(NOW + timedelta(minutes=8)),
+            }
+            w.read_metar(db, routine, f.METAR, NOW)
+            self.assertIn("Routine METAR", w.records(db, NOW)[0]["detail"])
+        self.src.block = "aviationweather.gov"
+        first = self.poll()
+        self.assertFalse(first["degraded"])
+        self.assertIn("HTTP 429", first["status"])
+        self.assertEqual(len(first["packets"]), 1)
 
     def test_source_to_book_saves_independent_null_forecast_and_exact_cutoff(self):
         run = self.poll()

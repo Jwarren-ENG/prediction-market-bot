@@ -133,6 +133,79 @@ class CatalogChanged(Exception):
     """A scoped market disappeared before its venue backfill could commit."""
 
 
+class HistoryReader:
+    def __init__(self, window):
+        self.archive = candles.Archive(window)
+        self.wake = threading.Event()
+        self.busy = False
+        self.next_at = 0.0
+        self.retry_at = 0.0
+        self.failures = 0
+
+    def failed(self, error, mono):
+        self.failures += 1
+        if isinstance(error, feeds.Unavailable) and error.code == 429:
+            delay = max(INTERVAL, min(366 * 86400, error.retry or 60))
+            self.archive.status = "rate_limited"
+            self.archive.message = f"Kalshi rate limited historical requests. Next attempt in at least {delay} seconds."
+        else:
+            delay = min(MAX_RETRY_SECONDS, INTERVAL * 2 ** min(self.failures - 1, 5))
+            self.archive.status = "error"
+            self.archive.message = f"Kalshi {self.archive.window.label} history could not be refreshed. Earlier venue closes retain their timestamps."
+        self.retry_at = mono + delay
+
+    def metadata(self, prefix, now, listings, live_status, live_message):
+        archive = self.archive
+        window = archive.window
+        status, message = archive.status, archive.message
+        end = window.completed_at(now)
+        eligible = [t for t, row in listings.items() if row.opened.timestamp() < end]
+        if live_status in ("disabled", "offline"):
+            status, message = live_status, live_message
+        elif live_status == "empty":
+            status, message = "empty", "No active Central Park contracts to retrieve."
+        elif listings and not eligible:
+            status, message = (
+                "empty",
+                f"No active listing has completed a {window.label} period since opening.",
+            )
+        elif status in ("ready", "empty"):
+            if not listings:
+                status, message = "waiting", "Waiting for a fresh active catalog."
+            elif any(
+                t not in archive.series or archive.series[t].through is None
+                for t in eligible
+            ):
+                status, message = (
+                    "partial",
+                    "Waiting for the newly listed contract history.",
+                )
+            elif archive.success:
+                age = (now - archive.success).total_seconds()
+                max_age = max(candles.MISSING_RETRY, window.period + STALE_AFTER)
+                past_due = now.timestamp() - end > candles.MISSING_RETRY and any(
+                    archive.series[t].through < end for t in eligible
+                )
+                if not 0 <= age <= max_age or past_due:
+                    status, message = (
+                        "partial",
+                        "The historical source has not refreshed recently.",
+                    )
+        return {
+            prefix + "_status": status,
+            prefix + "_message": message,
+            prefix + "_last_checked_at": weather.iso(archive.checked)
+            if archive.checked and archive.checked <= now
+            else None,
+            prefix + "_last_success_at": weather.iso(archive.success)
+            if archive.success and archive.success <= now
+            else None,
+            prefix + "_window_minutes": window.span // 60,
+            prefix + "_period_seconds": window.period,
+            prefix + "_source_url": candles.SOURCE,
+        }
+
+
 class QuoteTape:
     """Guard all licensed data with the same short lock used to change owner permission."""
 
@@ -144,11 +217,9 @@ class QuoteTape:
         self._now = now or feeds.clock
         self._mono = monotonic or time.monotonic
         self.wake = threading.Event()
-        self._history_wake = threading.Event()
-        self._history_busy = False
-        self._history_next = 0.0
-        self._history_retry = 0.0
-        self._history_failures = 0
+        self._readers = {
+            window: HistoryReader(window) for window in (candles.MINUTE, candles.HOURLY)
+        }
         self._scope = None
         self._busy = False
         self._next = 0.0
@@ -158,7 +229,8 @@ class QuoteTape:
 
     def _clear(self):
         self._listings = {}
-        self._archive = candles.Archive()
+        for reader in self._readers.values():
+            reader.archive.clear()
         self._checked = None
         self._success = None
         self._http_date = None
@@ -176,7 +248,8 @@ class QuoteTape:
         with self._lock:
             self._synchronize()
             self.wake.set()
-            self._history_wake.set()
+            for reader in self._readers.values():
+                reader.wake.set()
 
     def _prune(self, now):
         cutoff = now - WINDOW
@@ -186,7 +259,8 @@ class QuoteTape:
                 continue
             while row.history and row.history[0][0] < cutoff:
                 row.history.popleft()
-        self._archive.retain(self._listings, candles.end_minute(now))
+        for window, reader in self._readers.items():
+            reader.archive.retain(self._listings, window.completed_at(now))
 
     def _gate(self, expected):
         with self._lock:
@@ -217,10 +291,15 @@ class QuoteTape:
                 raise ValueError("The quote receipt clock did not advance.")
             for ticker, row in rows.items():
                 old = self._listings.get(ticker)
-                if old and old.close == row.close and old.label == row.label:
+                if old and (old.opened, old.close, old.label) == (
+                    row.opened,
+                    row.close,
+                    row.label,
+                ):
                     row.history = old.history
                 elif old:
-                    self._archive.series.pop(ticker, None)
+                    for reader in self._readers.values():
+                        reader.archive.series.pop(ticker, None)
                 row.history.append((received, row.bid, row.ask))
             self._listings = rows  # Complete catalog removes disappeared contracts.
             self._success = received
@@ -235,7 +314,8 @@ class QuoteTape:
                 self._message = f"Public quote snapshot received. {issues} listing(s) had incomplete or invalid fields."
             else:
                 self._message = "Latest posted YES bids and asks from Kalshi."
-            self._history_wake.set()
+            for reader in self._readers.values():
+                reader.wake.set()
 
     def _failed(self, scope, error):
         with self._lock:
@@ -290,7 +370,7 @@ class QuoteTape:
                 self._busy = False
         return True
 
-    def _history_scope(self, scope, tickers):
+    def _history_scope(self, scope, tickers, lifetimes=None):
         with self._lock:
             self._gate(scope)
             now = self._now()
@@ -301,13 +381,21 @@ class QuoteTape:
             ):
                 raise CatalogChanged()
             if any(
-                t not in self._listings or self._listings[t].close <= now
+                t not in self._listings
+                or self._listings[t].close <= now
+                or (
+                    lifetimes is not None
+                    and (self._listings[t].opened, self._listings[t].close)
+                    != lifetimes[t]
+                )
                 for t in tickers
             ):
                 raise CatalogChanged()
 
-    def poll_history(self):
-        """Read closed venue minute periods without blocking or updating the live tape."""
+    def poll_history(self, window=candles.MINUTE):
+        """Fetch completed venue periods for this resolution, independently of all other readers."""
+        reader = self._readers[window]
+        archive = reader.archive
         with self._lock:
             scope = self._synchronize()
             now = self._now()
@@ -317,44 +405,54 @@ class QuoteTape:
                 or self._status != "live"
                 or not self._success
                 or not 0 <= (now - self._success).total_seconds() <= STALE_AFTER
-                or self._history_busy
-                or mono < max(self._history_next, self._history_retry)
+                or reader.busy
+                or mono < max(reader.next_at, reader.retry_at)
             ):
                 return False
             self._prune(now)
-            calls = self._archive.plan(self._listings, candles.end_minute(now), mono)
+            openings = {t: row.opened.timestamp() for t, row in self._listings.items()}
+            calls = archive.plan(
+                self._listings, window.completed_at(now), mono, openings=openings
+            )
             if not calls:
                 return False
-            self._history_busy = True
-            self._history_next = mono + INTERVAL
-            self._archive.checked = now
-            if self._archive.success is None:
-                self._archive.status = "loading"
-                self._archive.message = (
-                    "Retrieving the past four hours of Kalshi minute closes."
+            reader.busy = True
+            reader.next_at = mono + INTERVAL
+            archive.checked = now
+            if archive.success is None:
+                archive.status = "loading"
+                archive.message = (
+                    f"Retrieving completed Kalshi {window.label} quote closes."
                 )
         try:
             for request in calls:
                 with self._lock:
                     self._history_scope(scope, request.tickers)
+                    lifetimes = {
+                        t: (self._listings[t].opened, self._listings[t].close)
+                        for t in request.tickers
+                    }
                     openings = {
-                        t: self._listings[t].opened.timestamp() for t in request.tickers
+                        t: opened.timestamp() for t, (opened, _) in lifetimes.items()
                     }
 
-                def guard(tickers=request.tickers):
-                    self._history_scope(scope, tickers)
+                def guard(tickers=request.tickers, expected=lifetimes):
+                    self._history_scope(scope, tickers, expected)
 
                 reply = self._fetch(
                     request.url(), max_bytes=8_000_000, permission_guard=guard
                 )
                 guard()
+                max_http_age = max(120, window.period + 3)
                 if (
                     reply.status != 200
                     or not reply.origin_date
-                    or not 0 <= reply.age <= 120
-                    or not -3 <= (reply.seen - reply.origin_date).total_seconds() <= 120
+                    or not 0 <= reply.age <= max_http_age
+                    or not -3
+                    <= (reply.seen - reply.origin_date).total_seconds()
+                    <= max_http_age
                     or reply.seen < now
-                    or request.end > candles.end_minute(reply.seen)
+                    or request.end > window.completed_at(reply.seen)
                     or request.end
                     > (reply.origin_date + timedelta(seconds=3)).timestamp()
                     or not 0 <= (self._now() - reply.seen).total_seconds() <= 120
@@ -363,76 +461,62 @@ class QuoteTape:
                 groups, issues = candles.parse(reply.json(), request, openings)
                 with self._lock:
                     guard()
-                    self._archive.merge(
-                        request, groups, issues, self._listings, self._mono()
-                    )
+                    archive.merge(request, groups, issues, self._listings, self._mono())
                     if groups:
-                        self._archive.success = reply.seen
+                        archive.success = reply.seen
             with self._lock:
                 self._gate(scope)
-                self._history_failures = 0
-                self._history_retry = 0.0
-                series = self._archive.series
-                count = sum(len(v.points) for v in series.values())
-                if any(s.retry_full or s.through is None for s in series.values()):
-                    self._archive.status = "partial"
-                    self._archive.message = "Some requested contract history was missing or invalid. Available venue closes are shown."
-                elif count:
-                    self._archive.status = "ready"
-                    self._archive.message = "Completed Kalshi one-minute YES quote closes. Minutes without a venue candle are left empty."
+                reader.failures = 0
+                reader.retry_at = 0.0
+                series = archive.series.values()
+                if any(s.retry_full or s.through is None for s in series):
+                    archive.status = "partial"
+                    archive.message = "Some requested contract history was missing or invalid. Available venue closes are shown."
+                elif any(s.points for s in series):
+                    archive.status = "ready"
+                    archive.message = f"Completed Kalshi {window.label} YES bid and ask closes. Gaps reflect periods without a venue candle."
                 else:
-                    self._archive.status = "empty"
-                    self._archive.message = (
-                        "Kalshi returned no completed minute closes in this window."
-                    )
+                    archive.status = "empty"
+                    archive.message = f"Kalshi returned no completed {window.label} closes in this window."
         except feeds.PermissionRevoked:
             pass
         except CatalogChanged:
             with self._lock:
                 if self._synchronize() == scope:
-                    self._archive.status = (
-                        "partial" if self._archive.success else "waiting"
-                    )
-                    self._archive.message = (
+                    archive.status = "partial" if archive.success else "waiting"
+                    archive.message = (
                         "The active catalog changed during the history request."
                     )
         except (feeds.Unavailable, *feeds.SAFE_ERRORS) as error:
             with self._lock:
                 if self._synchronize() == scope:
-                    self._history_failures += 1
-                    if isinstance(error, feeds.Unavailable) and error.code == 429:
-                        delay = max(INTERVAL, min(366 * 86400, error.retry or 60))
-                        self._archive.status = "rate_limited"
-                        self._archive.message = f"Kalshi rate limited historical requests. Next attempt in at least {delay} seconds."
-                    else:
-                        delay = min(
-                            MAX_RETRY_SECONDS,
-                            INTERVAL * 2 ** min(self._history_failures - 1, 5),
-                        )
-                        self._archive.status = "error"
-                        self._archive.message = "Kalshi minute history could not be refreshed. Earlier venue closes retain their timestamps."
-                    self._history_retry = self._mono() + delay
+                    reader.failed(error, self._mono())
         finally:
             with self._lock:
-                self._history_busy = False
+                reader.busy = False
         return True
 
-    def _history_loop(self, stop):
+    def _history_loop(self, stop, window):
+        wake = self._readers[window].wake
         while not stop.is_set():
-            self._history_wake.clear()
-            self.poll_history()
+            wake.clear()
+            self.poll_history(window)
             if not stop.is_set():
-                self._history_wake.wait(60)
+                wake.wait(60)
 
     def run(self, stop):
-        """A separate history reader keeps slow backfills off the live sampling clock."""
-        history = threading.Thread(
-            target=self._history_loop,
-            args=(stop,),
-            name="public-candle-reader",
-            daemon=True,
-        )
-        history.start()
+        """Independent history readers keep slow backfills off the live sampling clock."""
+        threads = [
+            threading.Thread(
+                target=self._history_loop,
+                args=(stop, window),
+                name=f"public-{window.label}-candles",
+                daemon=True,
+            )
+            for window in self._readers
+        ]
+        for thread in threads:
+            thread.start()
         try:
             while not stop.is_set():
                 self.wake.clear()
@@ -445,8 +529,10 @@ class QuoteTape:
                         max(0.1, min(60, remaining)) if mode == "enabled" else 60
                     )
         finally:
-            self._history_wake.set()
-            history.join(timeout=1)
+            for reader in self._readers.values():
+                reader.wake.set()
+            for thread in threads:
+                thread.join(timeout=1)
 
     def state(self):
         with self._lock:
@@ -472,39 +558,8 @@ class QuoteTape:
                     "empty",
                     "All contracts in the last snapshot reached their trading cutoff.",
                 )
-            archive = self._archive
-            history_status, history_message = archive.status, archive.message
-            if mode in ("disabled", "offline"):
-                history_status, history_message = status, message
-            elif status == "empty":
-                history_status, history_message = (
-                    "empty",
-                    "No active Central Park contracts to retrieve.",
-                )
-            elif history_status in ("ready", "empty") and not self._listings:
-                history_status, history_message = (
-                    "waiting",
-                    "Waiting for a fresh active catalog.",
-                )
-            elif history_status in ("ready", "empty") and self._listings:
-                if any(
-                    t not in archive.series or archive.series[t].through is None
-                    for t in self._listings
-                ):
-                    history_status, history_message = (
-                        "partial",
-                        "Waiting for the newly listed contract history.",
-                    )
-                elif (
-                    archive.success
-                    and not 0
-                    <= (now - archive.success).total_seconds()
-                    <= candles.MISSING_RETRY
-                ):
-                    history_status, history_message = (
-                        "partial",
-                        "The historical source has not refreshed recently.",
-                    )
+            minute = self._readers[candles.MINUTE]
+            hourly = self._readers[candles.HOURLY]
             rows = []
             if mode == "enabled":
                 for row in sorted(
@@ -515,6 +570,7 @@ class QuoteTape:
                             "id": row.ticker,
                             "label": row.label,
                             "event_date": row.day,
+                            "open_at": weather.iso(row.opened),
                             "close_at": weather.iso(row.close),
                             "last_trading_at": weather.iso(row.last_trading)
                             if row.last_trading
@@ -522,7 +578,8 @@ class QuoteTape:
                             "observed_at": weather.iso(row.observed),
                             "bid_cents": row.bid if status == "live" else None,
                             "ask_cents": row.ask if status == "live" else None,
-                            "candles": archive.view(row.ticker),
+                            "candles": minute.archive.view(row.ticker),
+                            "hourly_candles": hourly.archive.view(row.ticker),
                             "history": [
                                 {
                                     "at": weather.iso(at),
@@ -552,16 +609,9 @@ class QuoteTape:
                 if self._http_date and self._http_date <= now + timedelta(seconds=3)
                 else None,
                 "source_url": feeds.OPEN,
-                "history_status": history_status,
-                "history_message": history_message,
-                "history_last_checked_at": weather.iso(archive.checked)
-                if archive.checked and archive.checked <= now
-                else None,
-                "history_last_success_at": weather.iso(archive.success)
-                if archive.success and archive.success <= now
-                else None,
-                "history_window_minutes": candles.MINUTES,
-                "history_period_seconds": candles.PERIOD,
-                "history_source_url": candles.SOURCE,
+                **minute.metadata("history", now, self._listings, status, message),
+                **hourly.metadata(
+                    "hourly_history", now, self._listings, status, message
+                ),
                 "markets": rows,
             }

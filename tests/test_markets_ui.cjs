@@ -1,10 +1,11 @@
 const {before, test} = require('node:test');
 const assert = require('node:assert/strict');
 
-let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone;
+let quoteRows, quoteWindow, marketsView, paperSwitch, setDisplayTimeZone, bitcoinWindow, bitcoinCountdown, bitcoinView, comparisonView, optionsView;
 before(async () => {
   ({quoteRows, quoteWindow, marketsView, paperSwitch} = await import('../ui/markets.js'));
   ({setDisplayTimeZone} = await import('../ui/common.js'));
+  ({bitcoinWindow,bitcoinCountdown,bitcoinView,comparisonView,optionsView} = await import('../ui/bitcoin.js'));
   setDisplayTimeZone('UTC');
 });
 
@@ -193,4 +194,170 @@ test('changing display zone shifts market chart labels without moving captured i
     assert.match(eastern,/datetime="2026-11-26T11:00:00.000Z"/);
     assert.doesNotMatch(eastern,/Time \(UTC\)/);
   } finally {setDisplayTimeZone('UTC');}
+});
+
+test('day, two-day and week windows use the same capture and bounded hour closes', () => {
+  const state=snapshot([point(-15,50,54),point(0,50,54)],{hourly_candles:[
+    point(-8*86400,1,90),point(-4*86400,7,11),point(-36*3600,15,19),point(-12*3600,28,32),point(3600,1,2),
+  ]});
+  const [row]=quoteRows(state,true);
+  for (const [minutes,hours,low] of [[1440,1,28],[2880,2,15],[10080,3,7]]) {
+    const w=quoteWindow(row,state.quotes,minutes);
+    assert.equal(w.end,base);
+    assert.equal(w.start,base-minutes*60000);
+    assert.equal(w.observed.filter(p=>p.source==='hour').length,hours);
+    assert.deepEqual(w.bid,{low,high:50,count:hours+2});
+    const html=screen(state,{quoteRange:minutes});
+    assert.match(html,new RegExp(`data-value="${minutes}" aria-pressed="true"`));
+    assert.match(html,/Kalshi hourly close/);
+    assert.match(html,/<time class="first"[^>]*><span>Nov /);
+  }
+  assert.equal(quoteWindow(row,state.quotes,240).observed.filter(p=>p.source==='hour').length,0);
+  assert.equal(row.bidChange,0);
+});
+
+test('source gaps and one-sided coincident observations stay separate', () => {
+  const state=snapshot([point(0,35,null)],{candles:[point(-3600,22,24),point(0,35,37)],
+    hourly_candles:[point(-7*3600,10,15),point(-6*3600,11,16),point(-4*3600,17,null),point(-3600,19,27),point(0,28,90)]});
+  const [row]=quoteRows(state,true), w=quoteWindow(row,state.quotes,1440);
+  assert.deepEqual(w.points.filter(p=>p.at===base).map(p=>[p.source,p.bid,p.ask]),[['minute',null,37],['poll',35,null]]);
+  assert.equal(w.ask.high,37);
+  const html=screen(state,{quoteRange:1440});
+  assert.equal((html.match(/class="quote-line bid" data-source="hour"/g)||[]).length,1);
+  assert.equal((html.match(/class="quote-point bid" data-source="hour"/g)||[]).length,1);
+  assert.equal(row.ask,null);
+});
+
+test('new listings retain the full selected domain and discard pre-listing observations', () => {
+  const state=snapshot([point(0,null,27)],{open_at:at(-7200),hourly_candles:[point(-4*86400,5,17),point(-3600,22,null)]});
+  state.quotes.history_status='ready';
+  state.quotes.hourly_history_status='partial';
+  const [row]=quoteRows(state,true), w=quoteWindow(row,state.quotes,10080);
+  assert.equal(w.start,base-7*86400*1000);
+  assert.equal(w.observed.length,2);
+  const html=screen(state,{quoteRange:10080});
+  assert.match(html,/class="chart-before-listing"/);
+  assert.match(html,/Listed Nov 26, 2026 · 13:00:00 UTC/);
+  assert.match(html,/Some Kalshi hourly history is unavailable/);
+  assert.doesNotMatch(screen(state),/Some Kalshi hourly/);
+  delete state.quotes.markets[0].open_at;
+  assert.doesNotMatch(screen(state,{quoteRange:10080}),/Before listing/);
+});
+
+test('Bitcoin chart uses only completed hourly spot closes, honors each window and leaves missing hours open', () => {
+  const candle=(hours,price)=>({at:at(hours*3600),close_usd:price});
+  const market={enabled:true,auto_enabled:false,online:true,status:'Ready',last_checked_at:at(60),hourly:[
+    candle(-170,1),candle(-89,'92000.10'),candle(-40,'90000'),candle(-10,'93500'),
+    candle(-9,'93900'),candle(-7,'94400'),candle(-6,null),candle(-5,'93500'),candle(-4,'93600'),candle(1,'99999'),
+    {at:at(-601),close_usd:'1'}]};
+  for (const [minutes,expected] of [[1440,5],[2880,6],[10080,7]]) {
+    const w=bitcoinWindow(market,minutes);
+    assert.equal(w.end,base+60000);
+    assert.equal(w.end-w.start,minutes*60000);
+    assert.equal(w.observed.length,expected);
+    assert.ok(w.observed.every(p=>p.close>=90000 && p.close<99999));
+  }
+  const html=bitcoinView({bitcoin:market},{connected:true,locked:false,btcPanel:'spot',btcRange:1440});
+  assert.equal((html.match(/class="quote-line bid"/g)||[]).length,2);
+  assert.equal((html.match(/class="quote-point bid"/g)||[]).length,1);
+  assert.match(html,/5 completed hourly closes/);
+  assert.match(html,/Bitstamp/);
+  assert.doesNotMatch(html,/99999|Coinbase/);
+  assert.match(html,/Awaiting first quote/);
+});
+
+test('the Bitcoin spot strategy and the independent Compare tab read only their own accounts', () => {
+  const market={enabled:true,auto_enabled:false,online:true,status:'Delayed',last_checked_at:at(0),
+    quote:{fresh:false,bid_usd:'95813.12',ask_usd:'95814.89',source_at:at(-600)},portfolio:{equity_cents:1000000,btc:'0.05000000'},
+    benchmark:{equity_cents:1001000,btc:'0.005'},activity:[{at:at(-30),message:'Paper fill <checked>'}]};
+  const account={start_cents:1000000,end_cents:1001000,net_cents:1000,return_pct:.1,drawdown_cents:225};
+  const ui={connected:true,locked:false,btcPanel:'spot',btcRange:1440};
+  const snapshot={mode:'replay',paper_automation:{enabled:true},bitcoin:market,comparison:{start_at:at(-600),as_of:at(0),accounts:{weather:account,bitcoin:account,hold:account}}};
+  const html=bitcoinView(snapshot,ui);
+  assert.match(html,/Last observed quote/);
+  assert.match(html,/\$95,813\.12/);
+  assert.match(html,/data-action="btc-auto" data-value="true"[\s\S]*?aria-checked="false"/);
+  assert.match(html,/data-action="btc-feed" data-value="false"[\s\S]*?aria-checked="true"/);
+  assert.doesNotMatch(html,/Passive \$500 BTC hold|Central Park strategy|Strategy comparison|\+0.1%/);
+  assert.match(html,/Paper fill &lt;checked&gt;/);
+  assert.match(html,/0\.005 BTC/);
+  const compare=comparisonView(snapshot,ui);
+  assert.match(compare,/Passive \$500 BTC hold/);
+  assert.match(compare,/Central Park strategy/);
+  assert.match(compare,/\+0.1%/);
+  assert.match(compare,/Common start/);
+  assert.match(compare,/Latest shared mark/);
+  assert.doesNotMatch(compare,/0\.005 BTC|Spot strategy<\/button>|data-action="btc-auto"|Passive BTC position|\$95,813/);
+  snapshot.comparison={accounts:{}};
+  assert.match(comparisonView(snapshot,ui),/Waiting for the first shared equity marks/);
+  assert.match(bitcoinView(snapshot,{...ui,connected:false}),/Unknown/);
+  const options=optionsView();
+  assert.match(options,/Coming soon/);
+  assert.match(options,/being built/);
+  assert.doesNotMatch(options,/data-action=|role="switch"/);
+});
+
+const btcSidePoint = (sec,yesBid,yesAsk,noBid,noAsk) => ({at:at(sec),kind:'book',
+  yes_bid_cents:yesBid,yes_ask_cents:yesAsk,no_bid_cents:noBid,no_ask_cents:noAsk});
+function btcContracts(history,changes={}) {
+  const head=history.at(-1);
+  return {bitcoin_contracts:{status:'live',enabled:true,interval_seconds:10,stale_after_seconds:20,
+    last_checked_at:at(-1),last_success_at:head.at,recent:[],current:{id:'KXBTC15M-SYN1',title:'Bitcoin 15-minute contract',
+      comparison:'greater_or_equal',target_usd:'67654.32',open_at:at(-300),close_at:at(600),...head,observed_at:head.at,
+      http_date:at(-1),yes_ask_size:'12.40',no_ask_size:6,rules_primary:'Source rule <verified>',history},...changes}};
+}
+const contractsUI = {connected:true,locked:false,now:base};
+test('Bitcoin defaults to observed Kalshi odds with venue target, independent bid/ask moves and a real expiry', () => {
+  const snapshot=btcContracts([btcSidePoint(-10,54,56,44,46),btcSidePoint(0,56,58,42,44)]);
+  snapshot.bitcoin={quote:{mid_usd:999999},auto_enabled:true};
+  const html=bitcoinView(snapshot,contractsUI);
+  assert.match(html,/data-value="contracts" aria-selected="true"/);
+  assert.match(html,/Bitcoin at or above \$67,654\.32\?/);
+  assert.match(html,/YES ask<\/span><strong>58¢<\/strong>/);
+  assert.match(html,/NO ask<\/span><strong>44¢<\/strong>/);
+  assert.match(html,/\+2¢ since prior poll/); assert.match(html,/−2¢ since prior poll/);
+  assert.match(html,/12\.4 contracts at ask/); assert.match(html,/2 book receipts/);
+  assert.match(html,/data-btc-countdown="2026-11-26T15:10:00\.000Z" aria-live="off">10:00/);
+  assert.match(html,/15:00:00 UTC/); assert.match(html,/Venue response 14:59:59 UTC/);
+  assert.match(html,/Source rule &lt;verified&gt;/);
+  assert.doesNotMatch(html,/999,999|Bitstamp|data-action="btc-auto"|data-action="btc-feed"|Strategy comparison/);
+  assert.equal(bitcoinCountdown(at(1),base+999),'00:01');
+  assert.equal(bitcoinCountdown(at(1),base+1000),'Closed');
+  assert.equal(bitcoinCountdown('missing',base),'—');
+});
+test('contract receipts keep individual missing sides, explicit failure and long gaps without inventing moves', () => {
+  const history=[btcSidePoint(-100,50,55,45,50),btcSidePoint(-90,50,54,46,50),{at:at(-80),kind:'gap'},
+    btcSidePoint(-70,50,54,46,50),btcSidePoint(-60,50,null,null,50),
+    btcSidePoint(-10,51,null,null,49),btcSidePoint(0,52,56,44,48)];
+  const snapshot=btcContracts(history,{status:'partial'});
+  let html=bitcoinView(snapshot,contractsUI);
+  assert.equal((html.match(/class="quote-line bid"/g)||[]).length,1);
+  assert.equal((html.match(/class="quote-point bid"/g)||[]).length,2);
+  assert.equal((html.match(/class="quote-line ask"/g)||[]).length,3);
+  assert.doesNotMatch(html,/\+2¢ since prior poll/);
+  assert.match(html,/−1¢ since prior poll/);assert.match(html,/Quote unavailable/);
+  html=bitcoinView(btcContracts([btcSidePoint(-30,30,35,65,70),btcSidePoint(0,40,45,55,60)]),contractsUI);
+  assert.doesNotMatch(html,/since prior poll|class="quote-line/);
+  html=bitcoinView(btcContracts([btcSidePoint(0,65,20,0,100)]),contractsUI);
+  assert.match(html,/YES ask<\/span><strong>—/);
+  assert.match(html,/NO ask<\/span><strong>—/);
+});
+test('unavailable, stale, disconnected and expired contracts never expose obsolete current odds', () => {
+  const sample=btcSidePoint(-1,59,61,39,41), snapshot=btcContracts([sample]);
+  const fresh=bitcoinView(snapshot,contractsUI);
+  assert.match(fresh,/YES ask<\/span><strong>61¢/);
+  for(const status of ['stale','offline','error','waiting','rate_limited']) {
+    const html=bitcoinView(btcContracts([sample],{status}),contractsUI);
+    assert.doesNotMatch(html,/YES ask<\/span><strong>61¢/);
+  }
+  const stale=bitcoinView(btcContracts([sample]),{...contractsUI,now:base+25000});
+  assert.match(stale,/Quotes delayed/);assert.doesNotMatch(stale,/YES ask<\/span><strong>61¢/);
+  assert.doesNotMatch(bitcoinView(snapshot,{...contractsUI,connected:false}),/YES ask<\/span><strong>61¢/);
+  const disabled=bitcoinView(btcContracts([sample],{enabled:false}),contractsUI);
+  assert.match(disabled,/public Kalshi market data/);assert.match(disabled,/data-action="kalshi-settings"/);
+  assert.doesNotMatch(disabled,/KXBTC15M-SYN1|61¢/);
+  const archived=snapshot.bitcoin_contracts.current;
+  const closed=bitcoinView(btcContracts([sample],{current:archived,recent:[archived]}),{...contractsUI,now:base+601000});
+  assert.match(closed,/Waiting for the next 15-minute contract/);assert.match(closed,/Previous windows/);
+  assert.match(closed,/Last YES ask/);assert.doesNotMatch(closed,/data-btc-countdown|YES ask<\/span><strong>/);
 });

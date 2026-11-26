@@ -23,6 +23,8 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import monitoring
+
 
 MAX_QTY = 100
 POSITION_LIMIT = 10_000
@@ -587,6 +589,17 @@ class Ledger:
         """An indexed lookup for results first seen before this worker's catalog."""
         with self._transaction(write=False):
             return self._one("SELECT 1 FROM markets WHERE id=?", market_id) is not None
+
+    def decision_counts(self, start, end, stride):
+        with self._transaction(write=False):
+            return monitoring.counts(self.db, "decisions", start, end, stride)
+
+    def portfolio_mark(self, now, *, require_known_at=False):
+        with self._transaction(write=False):
+            last_event = self._account()["clock"]
+            if require_known_at and last_event and _dt(last_event) > now:
+                return None
+            return self._portfolio(now)
 
     def _verdict(self, row, value, at):
         prior = json.loads(row["verdict"])

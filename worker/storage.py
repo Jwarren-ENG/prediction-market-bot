@@ -9,7 +9,9 @@ import secrets
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from . import monitoring
 
 
 def utc():
@@ -109,7 +111,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS forward_scans(
                     id TEXT PRIMARY KEY, status TEXT NOT NULL, started_at TEXT,
                     finished_at TEXT, detail TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS scan_receipts_time ON forward_scans(finished_at);
             """)
+            db.executescript(monitoring.PAIR_SCHEMA)
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(research_notes)")
             }
@@ -203,8 +207,9 @@ class Store:
                 "INSERT INTO forward_scans VALUES(?,'running',?,NULL,?)",
                 (scan_id, at, "Collecting forward sources."),
             )
-            db.execute("""DELETE FROM forward_scans WHERE rowid < (
-                       SELECT rowid FROM forward_scans ORDER BY rowid DESC LIMIT 1 OFFSET 99)""")
+            cutoff = datetime.fromisoformat(at.replace("Z", "+00:00")) - timedelta(days=8)
+            db.execute("DELETE FROM forward_scans WHERE finished_at < ?",
+                       (cutoff.isoformat(timespec="microseconds").replace("+00:00", "Z"),))
         return scan_id
 
     def finish_scan(self, scan_id, status, at, detail, evidence):

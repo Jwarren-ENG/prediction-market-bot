@@ -1,4 +1,4 @@
-"""The four-hour venue series and the live quote receipt tape have separate clocks."""
+"""The hourly, minute and live quote series use independent clocks and provenance."""
 
 import json
 import threading
@@ -29,9 +29,55 @@ def utc_at(timestamp):
 
 
 class CandleBoundariesTest(unittest.TestCase):
+    def test_native_hourly_request_limits_and_sparse_seven_day_window(self):
+        window = candles.HOURLY
+        end = window.completed_at(NOW + timedelta(minutes=47))
+        archive = candles.Archive(window)
+        ids = tuple(f"id{i:02}" for i in range(100))
+        calls = archive.plan(ids, end, 1)
+        self.assertEqual([len(c.tickers) for c in calls], [59, 41])
+        for c in calls:
+            self.assertEqual((c.end, c.start), (end, end - 7 * 86400))
+            self.assertLessEqual(
+                (1 + (c.end - c.start) // 3600) * len(c.tickers), 10_000
+            )
+            query = parse_qs(urlsplit(c.url()).query)
+            self.assertEqual(query["period_interval"], ["60"])
+            self.assertNotIn("include_latest_before_start", query)
+
+        req = candles.Request(("week", "new"), end - window.span, end, window)
+        # A full inclusive response can contain an extra lower-boundary bar.
+        full = [period(t) for t in range(req.start, end + 1, 3600)]
+        opening = end - 3 * 3600 + 1500
+        sparse = [
+            period(req.start),
+            period(end - 3 * 3600),
+            period(end - 2 * 3600, "0.0000", "0.4400"),
+            period(end, "0.3000", "1.0000"),
+            period(end + 3600),
+            period(end - 60),
+        ]
+        records, issues = candles.parse(
+            {"markets": [group("week", full), group("new", sparse)]},
+            req,
+            {"week": req.start - 86400, "new": opening},
+        )
+        self.assertEqual(issues, {"new"})
+        self.assertEqual(len(records["week"]), 168)
+        self.assertNotIn(req.start, records["week"])
+        self.assertEqual(records["new"], {end - 2 * 3600: (None, 44), end: (30, None)})
+        archive.merge(req, records, issues, req.tickers, 2)
+        self.assertEqual(
+            [v["at"] for v in archive.view("new")],
+            [utc_at(end - 2 * 3600), utc_at(end)],
+        )
+        archive.retain(["week"], end + 2 * 3600)
+        self.assertEqual(len(archive.view("week")), 166)
+        self.assertFalse(archive.view("new"))
+
     def test_only_requested_completed_periods_and_reported_sides(self):
-        end = candles.end_minute(NOW)
-        req = candles.Request(("verified",), end - candles.SPAN, end)
+        end = candles.MINUTE.completed_at(NOW)
+        req = candles.Request(("verified",), end - candles.MINUTE.span, end)
         records = [
             period(end + 60),
             period(end),
@@ -67,7 +113,7 @@ class CandleBoundariesTest(unittest.TestCase):
         )
 
     def test_exact_four_hours_and_documented_batch_limits(self):
-        end = candles.end_minute(NOW)
+        end = candles.MINUTE.completed_at(NOW)
         a = candles.Archive()
         names = tuple(f"m{i:02}" for i in range(100))
         calls = a.plan(names, end, 0)
@@ -84,7 +130,7 @@ class CandleBoundariesTest(unittest.TestCase):
                 set(query), {"market_tickers", "start_ts", "end_ts", "period_interval"}
             )
             self.assertEqual(query["period_interval"], ["1"])
-        req = candles.Request(("m00",), end - candles.SPAN, end)
+        req = candles.Request(("m00",), end - candles.MINUTE.span, end)
         records = [period(t) for t in range(req.start, req.end + 1, 60)]
         data, issues = candles.parse(
             {"markets": [group("m00", records)]}, req, {"m00": req.start - 86400}
@@ -98,7 +144,7 @@ class CandleBoundariesTest(unittest.TestCase):
         )
 
     def test_duplicate_group_or_conflicting_closes_are_never_chosen_by_order(self):
-        end = candles.end_minute(NOW)
+        end = candles.MINUTE.completed_at(NOW)
         req = candles.Request(("a", "b"), end - 240 * 60, end)
         a = group("a", [period(end)])
         b = group("b", [period(end), period(end)])
@@ -116,12 +162,15 @@ class VenueHistoryTest(unittest.TestCase):
         self.listings = [market()]
         self.tick = self.listings[0]["ticker"]
         self.calls = []
+        self.hourly_calls = []
         self.missing = set()
         self.no_close = False
         self.error = None
+        self.error_period = None
         self.age = 0
         self.header_shift = 0
         self.block = False
+        self.block_period = None
         self.started = threading.Event()
         self.release = threading.Event()
         self.lock = threading.RLock()
@@ -149,14 +198,23 @@ class VenueHistoryTest(unittest.TestCase):
         start, end = int(query["start_ts"][0]), int(query["end_ts"][0])
         self.assertLessEqual(set(names), {m["ticker"] for m in self.listings})
         self.assertNotIn("include_latest_before_start", query)
-        self.calls.append((names, start, end))
+        interval = int(query["period_interval"][0])
+        self.assertIn(interval, (1, 60))
+        calls = self.calls if interval == 1 else self.hourly_calls
+        calls.append((names, start, end))
         self.started.set()
-        if self.block and not self.release.wait(2):
+        if (
+            self.block
+            and self.block_period in (None, interval)
+            and not self.release.wait(2)
+        ):
             raise RuntimeError("Historical test source timed out.")
-        if self.error:
+        if self.error and self.error_period in (None, interval):
             raise self.error
         out = [
-            group(t, [] if self.no_close else [period(start + 60), period(end)])
+            group(
+                t, [] if self.no_close else [period(start + interval * 60), period(end)]
+            )
             for t in names
             if t not in self.missing
         ]
@@ -185,7 +243,7 @@ class VenueHistoryTest(unittest.TestCase):
         self.assertEqual(pre["markets"][0]["candles"], [])
         self.assertTrue(self.tape.poll_history())
         s = self.tape.state()
-        end = candles.end_minute(self.now)
+        end = candles.MINUTE.completed_at(self.now)
         self.assertEqual(s["history_status"], "ready")
         self.assertEqual(s["history_source_url"], candles.SOURCE)
         self.assertEqual(s["history_last_success_at"], weather.iso(self.now))
@@ -200,7 +258,7 @@ class VenueHistoryTest(unittest.TestCase):
             row["candles"],
             [
                 {
-                    "at": utc_at(end - candles.SPAN + 60),
+                    "at": utc_at(end - candles.MINUTE.span + 60),
                     "bid_cents": 17,
                     "ask_cents": 32.5,
                 },
@@ -225,25 +283,24 @@ class VenueHistoryTest(unittest.TestCase):
         self.fetch_live(60)
         self.assertEqual(self.tape.state()["history_status"], "partial")
         self.tape.poll_history()
-        end = candles.end_minute(self.now)
+        end = candles.MINUTE.completed_at(self.now)
         self.assertEqual(
             self.calls[-2:],
             [
-                ((new["ticker"],), end - candles.SPAN, end),
+                ((new["ticker"],), end - candles.MINUTE.span, end),
                 ((self.tick,), end - 180, end),
             ],
         )
         self.fetch_live(2 * 3600)
         self.tape.poll_history()
-        end = candles.end_minute(self.now)
+        end = candles.MINUTE.completed_at(self.now)
         self.assertEqual(self.calls[-1][1:], (end - 2 * 3600 - 120, end))
         self.fetch_live(4 * 3600 + 1)
         self.tape.poll_history()
-        end = candles.end_minute(self.now)
-        self.assertEqual(self.calls[-1][1:], (end - candles.SPAN, end))
+        end = candles.MINUTE.completed_at(self.now)
+        self.assertEqual(self.calls[-1][1:], (end - candles.MINUTE.span, end))
         self.listings = [new]
         self.fetch_live(15)
-        self.assertNotIn(self.tick, self.tape._archive.series)
         self.assertEqual(
             [r["id"] for r in self.tape.state()["markets"]], [new["ticker"]]
         )
@@ -267,8 +324,8 @@ class VenueHistoryTest(unittest.TestCase):
         self.assertIn(
             (
                 (newcomer["ticker"],),
-                candles.end_minute(self.now) - candles.SPAN,
-                candles.end_minute(self.now),
+                candles.MINUTE.completed_at(self.now) - candles.MINUTE.span,
+                candles.MINUTE.completed_at(self.now),
             ),
             self.calls,
         )
@@ -367,3 +424,163 @@ class VenueHistoryTest(unittest.TestCase):
         )
         self.assertEqual(result["markets"], [])
         self.assertIsNone(result["history_last_success_at"])
+
+    def test_hourly_history_is_distinct_and_hits_the_venue_only_when_due(self):
+        hour = candles.HOURLY
+        end = hour.completed_at(self.now)
+        self.fetch_live()
+        self.assertTrue(self.tape.poll_history())
+        self.assertTrue(self.tape.poll_history(hour))
+        result = self.tape.state()
+        self.assertEqual(result["hourly_history_status"], "ready")
+        self.assertEqual(
+            result["hourly_history_last_checked_at"], weather.iso(self.now)
+        )
+        self.assertEqual(
+            result["hourly_history_last_success_at"], weather.iso(self.now)
+        )
+        self.assertEqual(result["hourly_history_period_seconds"], 3600)
+        self.assertEqual(result["hourly_history_window_minutes"], 7 * 24 * 60)
+        self.assertEqual(result["hourly_history_source_url"], candles.SOURCE)
+        (m,) = result["markets"]
+        self.assertEqual(m["open_at"], self.listings[0]["open_time"])
+        self.assertEqual(len(m["history"]), 1)
+        self.assertEqual(len(m["candles"]), 2)
+        # The fixture also sends a week-old bar that predates this listing.
+        self.assertEqual(
+            m["hourly_candles"],
+            [{"at": utc_at(end), "bid_cents": 17, "ask_cents": 32.5}],
+        )
+        self.assertEqual(self.hourly_calls, [((self.tick,), end - 7 * 86400, end)])
+        self.fetch_live(15 * 60)
+        self.assertFalse(self.tape.poll_history(hour))
+        self.assertEqual(self.tape.state()["hourly_history_status"], "ready")
+        self.assertTrue(self.tape.poll_history())
+        self.fetch_live(45 * 60)
+        self.assertTrue(self.tape.poll_history(hour))
+        self.assertEqual(
+            self.hourly_calls[-1], ((self.tick,), end - 2 * 3600, end + 3600)
+        )
+
+    def test_new_listing_skips_hourly_requests_until_a_period_actually_closes(self):
+        hour = candles.HOURLY
+        self.listings[0]["open_time"] = weather.iso(self.now - timedelta(seconds=1))
+        self.fetch_live()
+        self.assertFalse(self.tape.poll_history(hour))
+        r = self.tape.state()
+        self.assertEqual(r["hourly_history_status"], "empty")
+        self.assertFalse(r["markets"][0]["hourly_candles"])
+        self.assertIsNone(r["hourly_history_last_success_at"])
+        self.assertFalse(self.hourly_calls)
+        self.fetch_live(3600)
+        self.assertTrue(self.tape.poll_history(hour))
+        end = hour.completed_at(self.now)
+        self.assertEqual(
+            [p["at"] for p in self.tape.state()["markets"][0]["hourly_candles"]],
+            [utc_at(end)],
+        )
+        self.listings.append(market(floor=46))
+        self.fetch_live(15)
+        self.assertEqual(self.tape.state()["hourly_history_status"], "partial")
+        self.assertTrue(self.tape.poll_history(hour))
+        self.assertEqual(
+            self.hourly_calls[-1],
+            ((self.listings[-1]["ticker"],), end - hour.span, end),
+        )
+
+    def test_hourly_throttle_and_missing_group_leave_other_quote_streams_healthy(self):
+        hour = candles.HOURLY
+        self.fetch_live()
+        self.tape.poll_history(hour)
+        recorded = self.tape.state()["markets"][0]["hourly_candles"]
+        saved_at = self.tape.state()["hourly_history_last_success_at"]
+        self.error = feeds.Unavailable("rate limit", 429, 80)
+        self.error_period = 60
+        self.fetch_live(3600)
+        self.assertTrue(self.tape.poll_history(hour))
+        self.assertTrue(self.tape.poll_history())
+        s = self.tape.state()
+        self.assertEqual(
+            (s["status"], s["history_status"], s["hourly_history_status"]),
+            ("live", "ready", "rate_limited"),
+        )
+        self.assertEqual(s["markets"][0]["hourly_candles"], recorded)
+        self.assertEqual(s["hourly_history_last_success_at"], saved_at)
+        self.fetch_live(60)
+        self.assertFalse(self.tape.poll_history(hour))
+        self.assertTrue(self.tape.poll_history())
+        self.fetch_live(20)
+        self.error = None
+        self.missing = {self.tick}
+        self.assertTrue(self.tape.poll_history(hour))
+        s = self.tape.state()
+        self.assertEqual(s["hourly_history_status"], "partial")
+        self.assertEqual(s["markets"][0]["hourly_candles"], recorded)
+        self.fetch_live(60)
+        self.assertFalse(self.tape.poll_history(hour))
+        self.missing.clear()
+        self.fetch_live(candles.MISSING_RETRY - 60)
+        self.assertTrue(self.tape.poll_history(hour))
+        self.assertEqual(self.tape.state()["hourly_history_status"], "ready")
+
+    def test_blocked_hourly_fetch_spares_minute_and_live_and_cannot_survive_revoke(
+        self,
+    ):
+        hour = candles.HOURLY
+        self.fetch_live()
+        self.block = True
+        self.block_period = 60
+        t = threading.Thread(target=self.tape.poll_history, args=(hour,))
+        t.start()
+        try:
+            self.assertTrue(self.started.wait(1))
+            self.assertEqual(self.tape.state()["hourly_history_status"], "loading")
+            self.assertTrue(self.tape.poll_history())
+            self.assertEqual(self.tape.state()["history_status"], "ready")
+            self.fetch_live(15)
+            self.assertFalse(self.tape.poll_history(hour))
+            self.assertEqual(len(self.tape.state()["markets"][0]["history"]), 2)
+            with self.lock:
+                self.mode = "disabled"
+                self.generation += 1
+                self.tape.permission_changed()
+                s = self.tape.state()
+                self.assertEqual(
+                    (s["history_status"], s["hourly_history_status"]),
+                    ("disabled", "disabled"),
+                )
+                self.assertIsNone(s["hourly_history_last_checked_at"])
+                self.assertEqual(s["markets"], [])
+                self.mode = "enabled"
+                self.generation += 1
+                self.tape.permission_changed()
+                self.fetch_live(15)
+        finally:
+            self.release.set()
+            t.join(2)
+        self.assertFalse(t.is_alive())
+        s = self.tape.state()
+        self.assertEqual(s["hourly_history_status"], "waiting")
+        self.assertIsNone(s["hourly_history_last_success_at"])
+        self.assertEqual(s["markets"][0]["hourly_candles"], [])
+        self.assertEqual(s["markets"][0]["candles"], [])
+
+    def test_changed_listing_lifetime_discards_inflight_hourly_data(self):
+        hour = candles.HOURLY
+        self.fetch_live()
+        self.block = True
+        self.block_period = 60
+        t = threading.Thread(target=self.tape.poll_history, args=(hour,))
+        t.start()
+        try:
+            self.assertTrue(self.started.wait(1))
+            self.listings[0]["open_time"] = weather.iso(self.now - timedelta(minutes=2))
+            self.fetch_live(15)
+        finally:
+            self.release.set()
+            t.join(2)
+        self.assertFalse(t.is_alive())
+        s = self.tape.state()
+        self.assertIsNone(s["hourly_history_last_success_at"])
+        self.assertEqual(s["markets"][0]["hourly_candles"], [])
+        self.assertEqual(s["markets"][0]["open_at"], self.listings[0]["open_time"])
