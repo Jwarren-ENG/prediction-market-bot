@@ -380,13 +380,17 @@ class Contract:
         )
         return {
             **terms,
-            "source_at": stamp(self.source_at)
-            if self.source_at and self.source_at <= now + timedelta(seconds=3)
-            else None,
+            "source_at": (
+                stamp(self.source_at)
+                if self.source_at and self.source_at <= now + timedelta(seconds=3)
+                else None
+            ),
             "observed_at": stamp(self.seen) if self.seen and self.seen <= now else None,
-            "http_date": stamp(self.http)
-            if self.http and self.http <= now + timedelta(seconds=3)
-            else None,
+            "http_date": (
+                stamp(self.http)
+                if self.http and self.http <= now + timedelta(seconds=3)
+                else None
+            ),
             **best(depth, True),
             "depth": depth,
             "history": [
@@ -402,6 +406,7 @@ class BitcoinContracts:
     catalog_url = CATALOG
     rules_url = RULES
     max_http_age = 5
+    catalog_max_http_age = None
     freshness_error = ValueError
     window_minutes = 15
     separate_fee_reads = True
@@ -456,7 +461,8 @@ class BitcoinContracts:
         if self._synchronize() != expected:
             raise feeds.PermissionRevoked("Public BTC venue permission changed.")
 
-    def _read(self, url, scope, started, limit):
+    def _read(self, url, scope, started, limit, max_age=None):
+        max_age = self.max_http_age if max_age is None else max_age
         self._gate(scope)
         reply = self._fetch(
             url, max_bytes=limit, permission_guard=lambda: self._gate(scope)
@@ -465,10 +471,8 @@ class BitcoinContracts:
         if (
             reply.status != 200
             or not reply.origin_date
-            or not 0 <= reply.age <= self.max_http_age
-            or not -3
-            <= (reply.seen - reply.origin_date).total_seconds()
-            <= self.max_http_age
+            or not 0 <= reply.age <= max_age
+            or not -3 <= (reply.seen - reply.origin_date).total_seconds() <= max_age
             or reply.seen < started
             or not 0 <= (self._now() - reply.seen).total_seconds() <= INTERVAL
         ):
@@ -528,7 +532,9 @@ class BitcoinContracts:
         return True
 
     def _capture(self, scope, started):
-        catalog = self._read(self.catalog_url, scope, started, 500_000)
+        catalog = self._read(
+            self.catalog_url, scope, started, 500_000, self.catalog_max_http_age
+        )
         candidate = self.select_market(catalog.json(), catalog)
         with self._lock:
             self._check_scope(scope)
@@ -589,6 +595,11 @@ class BitcoinContracts:
             delay = INTERVAL
             self._status = "stale"
             self._message = f"{self.venue_name} returned a stale BTC snapshot. Waiting for fresh quotes."
+        elif isinstance(error, feeds.Unavailable) and error.code == 404:
+            self._failures = 0
+            delay = INTERVAL
+            self._status = "waiting"
+            self._message = f"{self.venue_name} has not published the market or book for this window."
         elif isinstance(error, feeds.Unavailable) and error.code in (401, 403, 451):
             delay = 300
             self._status = "restricted"
@@ -767,20 +778,28 @@ class BitcoinContracts:
                 "enabled": mode == "enabled",
                 "interval_seconds": INTERVAL,
                 "stale_after_seconds": STALE,
-                "last_checked_at": stamp(self._checked)
-                if self._checked and self._checked <= now
-                else None,
-                "last_success_at": stamp(self._success)
-                if self._success and self._success <= now
-                else None,
-                "http_date": stamp(self._http)
-                if self._http and self._http <= now + timedelta(seconds=3)
-                else None,
+                "last_checked_at": (
+                    stamp(self._checked)
+                    if self._checked and self._checked <= now
+                    else None
+                ),
+                "last_success_at": (
+                    stamp(self._success)
+                    if self._success and self._success <= now
+                    else None
+                ),
+                "http_date": (
+                    stamp(self._http)
+                    if self._http and self._http <= now + timedelta(seconds=3)
+                    else None
+                ),
                 "source_url": self.catalog_url,
                 "rules_url": self.rules_url,
                 "interval_minutes": self.window_minutes,
-                "current": current.view(now, status in ("partial", "live"))
-                if current
-                else None,
+                "current": (
+                    current.view(now, status in ("partial", "live"))
+                    if current
+                    else None
+                ),
                 "recent": [row.view(now, False) for row in recent],
             }

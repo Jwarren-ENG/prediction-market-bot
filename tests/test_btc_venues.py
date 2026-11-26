@@ -1,6 +1,7 @@
 import json
 import threading
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 
 from tests.test_bitcoin_contracts import book as kalshi_book
@@ -129,7 +130,7 @@ class MonitorTest(unittest.TestCase):
     def register(self, minutes, opened=OPEN):
         e = event(minutes, opened)
         m = e["markets"][0]
-        self.catalog[v.us_catalog(v.HORIZONS[minutes])] = {"events": [e]}
+        self.catalog[v.us_event_url(minutes, opened)] = {"event": e}
         self.books[v.us_market_url(m["slug"], "book")] = book(
             m, self.now - timedelta(seconds=4)
         )
@@ -201,6 +202,64 @@ class MonitorTest(unittest.TestCase):
             )  # venue age 21s, local receipt only 17s
             self.assertIsNone(state["current"]["yes_ask_cents"])
 
+    def test_targeted_event_lookup_crosses_the_hour_without_fetching_other_strikes(
+        self,
+    ):
+        adapter = self.create(60)
+        previous_url = adapter.catalog_url
+        self.assertTrue(adapter.poll())
+        self.assertEqual(self.calls[0], previous_url)
+        self.assertEqual(
+            previous_url, v.US_API + "/v1/events/slug/btc-updown-1h-2026-11-26-2100z"
+        )
+        self.advance(60 * 60)
+        event_row, market = self.register(60, OPEN + timedelta(hours=1))
+        self.assertTrue(adapter.poll())
+        self.assertEqual(
+            self.calls[-2], v.US_API + "/v1/events/slug/" + event_row["slug"]
+        )
+        self.assertEqual(adapter.state()["current"]["id"], market["slug"])
+        self.assertFalse(any("/tags/" in url for url in self.calls))
+        self.assertTrue(all(v.us_allowed(url) for url in self.calls))
+        self.assertIsNone(
+            adapter.select_market({"event": event(60)}, reply({}, self.now))
+        )
+
+    def test_event_cache_lifetime_does_not_extend_executable_book_lifetime(self):
+        adapter = self.create(60)
+        book_age = 0
+
+        def cached(url, **kwargs):
+            original = self.fetch(url, **kwargs)
+            return replace(original, age=25 if url == adapter.catalog_url else book_age)
+
+        adapter._fetch = cached
+        self.assertTrue(adapter.poll())
+        initial = adapter.state()
+        self.assertEqual(initial["status"], "live")
+        self.assertEqual(
+            initial["current"]["fee_verified_at"], iso(self.now - timedelta(seconds=25))
+        )
+        self.advance(10)
+        book_age = 25
+        self.assertTrue(adapter.poll())
+        self.assertEqual(adapter.state()["status"], "stale")
+        self.assertIsNone(adapter.state()["current"]["yes_ask_cents"])
+
+    def test_unpublished_new_window_retries_on_the_next_poll(self):
+        adapter = self.create()
+        self.errors[adapter.catalog_url] = feeds.Unavailable("Not published", 404)
+        self.assertTrue(adapter.poll())
+        self.advance(10)
+        self.assertTrue(adapter.poll())
+        self.assertEqual(adapter.state()["status"], "waiting")
+        del self.errors[adapter.catalog_url]
+        self.advance(10)
+        _, market = self.register(5)
+        self.assertTrue(adapter.poll())
+        self.assertEqual(adapter.state()["current"]["id"], market["slug"])
+        self.assertEqual(adapter.state()["status"], "live")
+
     def test_rollover_does_not_join_books_between_products_or_windows(self):
         f = self.create()
         f.poll()
@@ -216,7 +275,7 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(len(state["current"]["history"]), 1)
         self.assertFalse(state["recent"][0]["depth"]["yes"]["asks"])
         self.advance(10)
-        self.catalog[f.catalog_url] = {"events": [event(60)]}
+        self.catalog[f.catalog_url] = {"event": event(60)}
         self.assertTrue(f.poll())
         self.assertEqual(f.state()["status"], "empty")
         self.assertEqual(self.calls[-1], f.catalog_url)
@@ -229,12 +288,12 @@ class MonitorTest(unittest.TestCase):
         changed = event()
         changed["markets"][0]["assetPriceTerms"]["priceToBeat"] = None
         changed["markets"][0]["feeCoefficient"] = 0.37
-        meta = adapter.select_market({"events": [changed]}, at).meta
+        meta = adapter.select_market({"event": changed}, at).meta
         self.assertIsNone(meta["target_usd"])
         self.assertIsNone(meta["fee_rate"])
         changed["markets"][0]["feeCoefficient"] = "unverified"
         self.assertIsNone(
-            adapter.select_market({"events": [changed]}, at).meta["fee_rate"]
+            adapter.select_market({"event": changed}, at).meta["fee_rate"]
         )
         for mutation in (
             lambda m: m["marketSides"][0].update(long=False),
@@ -257,8 +316,8 @@ class MonitorTest(unittest.TestCase):
                 e = event()
                 mutation(e["markets"][0])
                 with self.assertRaises(ValueError):
-                    adapter.select_market({"events": [e]}, at)
-        candidate = adapter.select_market({"events": [event()]}, at)
+                    adapter.select_market({"event": e}, at)
+        candidate = adapter.select_market({"event": event()}, at)
         for mutate in (
             lambda b: b.update(marketSlug="wrong"),
             lambda b: b.update(state="MARKET_STATE_EXPIRED"),
@@ -318,7 +377,7 @@ class MonitorTest(unittest.TestCase):
         for bad in (
             "https://clob.polymarket.com/markets",
             v.US_API + "/v1/orders",
-            v.us_catalog("15m"),
+            v.US_API + "/v1/events/slug/btc-updown-15m-2026-11-26-2100z",
             v.US_API + "/v1/market/slug/cpc-btc-updown-5m-2026-11-26-2100z?other=1",
         ):
             with self.assertRaises(ValueError):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 from . import bitcoin_contracts as kalshi
@@ -15,14 +15,20 @@ US_API = "https://gateway.polymarket.us"
 US_RULES = "https://www.polymarketexchange.com/files/product-terms/CPC.pdf"
 US_FEES = "https://docs.polymarket.us/fees"
 US_SITE = "https://polymarket.us/event/"
-SLUG = re.compile(r"cpc-btc-updown-(5m|1h)-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}z")
+EVENT_PATTERN = r"btc-updown-(5m|1h)-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}z"
+SLUG = re.compile("cpc-" + EVENT_PATTERN)
 HORIZONS = {5: "5m", 60: "1h"}
 REVIEWED_POLY_RATES = {Decimal(v) for v in ("0.11", "0.10", "0.09", "0.0695")}
 SEEN_FEE_SCHEDULE = weather.instant("2026-11-26T02:45:00Z")
 
 
-def us_catalog(horizon):
-    return f"{US_API}/v2/tags/bitcoin-{horizon}/events?active=true&closed=false&limit=8"
+def us_event_url(minutes, now):
+    # A crypto tag can contain hundreds of unrelated strike markets at an hourly rollover.
+    # Fetch the candidate event directly, then verify its official terms and both timestamps.
+    utc = now.astimezone(timezone.utc)
+    start = utc.replace(minute=utc.minute // minutes * minutes, second=0, microsecond=0)
+    slug = f"btc-updown-{HORIZONS[minutes]}-{start:%Y-%m-%d-%H%M}z"
+    return f"{US_API}/v1/events/slug/{slug}"
 
 
 def us_market_url(slug, resource):
@@ -36,7 +42,7 @@ def us_market_url(slug, resource):
 
 
 def us_allowed(url):
-    if url in (us_catalog("5m"), us_catalog("1h")):
+    if re.fullmatch(re.escape(US_API) + "/v1/events/slug/" + EVENT_PATTERN, url):
         return True
     return bool(
         re.fullmatch(
@@ -166,6 +172,7 @@ class PolymarketContracts(kalshi.BitcoinContracts):
     venue_name = "Polymarket US"
     rules_url = US_RULES
     max_http_age = kalshi.STALE
+    catalog_max_http_age = 30  # Venue event metadata has a 30-second public cache.
     freshness_error = kalshi.StaleBook
     separate_fee_reads = False
 
@@ -176,119 +183,129 @@ class PolymarketContracts(kalshi.BitcoinContracts):
             raise ValueError("Unsupported US Bitcoin interval.")
         self.window_minutes = interval_minutes
         self.horizon = HORIZONS[interval_minutes]
-        self.catalog_url = us_catalog(self.horizon)
         super().__init__(
             access, lock, fetch=fetch or us_download, now=now, monotonic=monotonic
         )
 
+    @property
+    def catalog_url(self):
+        return us_event_url(self.window_minutes, self._now())
+
     def select_market(self, payload, reply):
-        rows = payload.get("events")
-        if not isinstance(rows, list) or len(rows) >= 8:
-            raise ValueError("Missing or incomplete US Bitcoin catalog.")
-        chosen = None
-        for e in rows:
-            if (
-                e.get("seriesSlug") != "btc-updown-" + self.horizon
-                or e.get("category") != "crypto"
-            ):
-                continue
-            if (
-                e.get("active") is not True
-                or e.get("closed") is not False
-                or e.get("archived") is not False
-            ):
-                continue
-            start, end = weather.instant(e["startDate"]), weather.instant(e["endDate"])
-            if not start <= reply.seen < end:
-                continue
-            markets = e.get("markets")
-            if not isinstance(markets, list) or len(markets) != 1:
-                raise ValueError("Ambiguous US event instrument.")
-            m = markets[0]
-            if (
-                m.get("status") != "MARKET_STATUS_OPEN"
-                or m.get("active") is not True
-                or m.get("closed") is not False
-                or m.get("archived") is not False
-            ):
-                continue
-            opened, closed, event = us_identity(m, self.horizon)
-            updated = weather.instant(m["updatedAt"])
-            if (
-                (opened, closed) != (start, end)
-                or e.get("slug") != event
-                or e.get("ticker") != event
-                or not opened <= reply.origin_date < closed
-                or updated > reply.seen
-                or weather.instant(e["updatedAt"]) > reply.seen
-                or not all(x.get("tradable") is True for x in m["marketSides"])
-                or not isinstance(e.get("title"), str)
-                or not 0 < len(e["title"]) <= 160
-            ):
-                raise ValueError("US market and event timing or sides disagree.")
-            ref = m["assetPriceTerms"].get("priceToBeat")
-            price = cash(ref) if ref is not None else None
-            if price is not None and (
-                not 0 < price <= 100_000_000
-                or price * 100 != (price * 100).to_integral_value()
-            ):
-                raise ValueError("Invalid US opening target.")
-            rate = None
-            tick = quotes._number(m["orderPriceMinTickSize"]) * 100
-            minimum = quotes._number(m["minimumTradeQty"])
-            if (
-                tick not in (Decimal("0.01"), Decimal("0.1"), Decimal(1))
-                or not 0 < minimum <= 1
-            ):
-                raise ValueError("Unverified US market tick or minimum quantity.")
-            if m.get("feeCoefficient") is not None and reply.seen >= SEEN_FEE_SCHEDULE:
-                try:
-                    coefficient = quotes._number(m["feeCoefficient"])
-                except feeds.SAFE_ERRORS:
-                    coefficient = None
-                if coefficient in REVIEWED_POLY_RATES:
-                    rate = format(coefficient, "f")
-            if chosen is not None:
-                raise ValueError("Multiple active US BTC windows.")
-            chosen = kalshi.Contract(
-                opened,
-                closed,
-                {
-                    "id": m["slug"],
-                    "venue": "polymarket_us",
-                    "interval_minutes": self.window_minutes,
-                    "event_id": event,
-                    "title": e["title"],
-                    "open_at": kalshi.stamp(opened),
-                    "close_at": kalshi.stamp(closed),
-                    "updated_at": kalshi.stamp(updated),
-                    "target_usd": format(price, ".2f") if price is not None else None,
-                    "comparison": "greater_or_equal",
-                    "rules_primary": m["description"],
-                    "tick_size_cents": kalshi.display_number(tick),
-                    "minimum_contracts": kalshi.display_number(minimum),
-                    "rules_secondary": "The US contract uses the published BRTI average at each window boundary.",
-                    "rules_verified": True,
-                    "rules_url": US_RULES,
-                    "index_url": kalshi.INDEX,
-                    "market_url": US_SITE + event,
-                    "book_url": us_market_url(m["slug"], "book"),
-                    "catalog_observed_at": kalshi.stamp(reply.seen),
-                    "catalog_http_date": kalshi.stamp(reply.origin_date),
-                    "source_time_kind": "venue_book_transact_time",
-                    "fee_rate": rate,
-                    "fee_source": US_FEES,
-                    "fee_market_url": us_market_url(m["slug"], "metadata"),
-                    "fee_verified_at": kalshi.stamp(reply.seen) if rate else None,
-                    "fee_valid_until": kalshi.stamp(
-                        min(closed, reply.seen + timedelta(seconds=kalshi.STALE))
+        e = payload.get("event")
+        if not isinstance(e, dict):
+            raise ValueError("Missing US Bitcoin event.")
+        if (
+            e.get("seriesSlug") != "btc-updown-" + self.horizon
+            or e.get("category") != "crypto"
+        ):
+            return None
+        if (
+            e.get("active") is not True
+            or e.get("closed") is not False
+            or e.get("archived") is not False
+        ):
+            return None
+        start, end = weather.instant(e["startDate"]), weather.instant(e["endDate"])
+        if not start <= reply.seen < end:
+            return None
+        markets = e.get("markets")
+        if not isinstance(markets, list) or len(markets) != 1:
+            raise ValueError("Ambiguous US event instrument.")
+        m = markets[0]
+        if (
+            m.get("status") != "MARKET_STATUS_OPEN"
+            or m.get("active") is not True
+            or m.get("closed") is not False
+            or m.get("archived") is not False
+        ):
+            return None
+        opened, closed, event = us_identity(m, self.horizon)
+        updated = weather.instant(m["updatedAt"])
+        metadata_at = min(
+            reply.seen - timedelta(seconds=reply.age), reply.origin_date, reply.seen
+        )
+        if (
+            (opened, closed) != (start, end)
+            or e.get("slug") != event
+            or e.get("ticker") != event
+            or not opened <= reply.origin_date < closed
+            or metadata_at < opened
+            or updated > reply.seen
+            or weather.instant(e["updatedAt"]) > reply.seen
+            or not all(x.get("tradable") is True for x in m["marketSides"])
+            or not isinstance(e.get("title"), str)
+            or not 0 < len(e["title"]) <= 160
+        ):
+            raise ValueError("US market and event timing or sides disagree.")
+        ref = m["assetPriceTerms"].get("priceToBeat")
+        price = cash(ref) if ref is not None else None
+        if price is not None and (
+            not 0 < price <= 100_000_000
+            or price * 100 != (price * 100).to_integral_value()
+        ):
+            raise ValueError("Invalid US opening target.")
+        rate = None
+        tick = quotes._number(m["orderPriceMinTickSize"]) * 100
+        minimum = quotes._number(m["minimumTradeQty"])
+        if (
+            tick not in (Decimal("0.01"), Decimal("0.1"), Decimal(1))
+            or not 0 < minimum <= 1
+        ):
+            raise ValueError("Unverified US market tick or minimum quantity.")
+        if m.get("feeCoefficient") is not None and reply.seen >= SEEN_FEE_SCHEDULE:
+            try:
+                coefficient = quotes._number(m["feeCoefficient"])
+            except feeds.SAFE_ERRORS:
+                coefficient = None
+            if coefficient in REVIEWED_POLY_RATES:
+                rate = format(coefficient, "f")
+        return kalshi.Contract(
+            opened,
+            closed,
+            {
+                "id": m["slug"],
+                "venue": "polymarket_us",
+                "interval_minutes": self.window_minutes,
+                "event_id": event,
+                "title": e["title"],
+                "open_at": kalshi.stamp(opened),
+                "close_at": kalshi.stamp(closed),
+                "updated_at": kalshi.stamp(updated),
+                "target_usd": format(price, ".2f") if price is not None else None,
+                "comparison": "greater_or_equal",
+                "rules_primary": m["description"],
+                "tick_size_cents": kalshi.display_number(tick),
+                "minimum_contracts": kalshi.display_number(minimum),
+                "rules_secondary": "The US contract uses the published BRTI average at each window boundary.",
+                "rules_verified": True,
+                "rules_url": US_RULES,
+                "index_url": kalshi.INDEX,
+                "market_url": US_SITE + event,
+                "book_url": us_market_url(m["slug"], "book"),
+                "catalog_observed_at": kalshi.stamp(reply.seen),
+                "catalog_http_date": kalshi.stamp(reply.origin_date),
+                "source_time_kind": "venue_book_transact_time",
+                "fee_rate": rate,
+                "fee_source": US_FEES,
+                "fee_market_url": us_market_url(m["slug"], "metadata"),
+                "fee_verified_at": kalshi.stamp(metadata_at) if rate else None,
+                "fee_valid_until": (
+                    kalshi.stamp(
+                        min(
+                            closed,
+                            metadata_at
+                            + timedelta(
+                                seconds=self.catalog_max_http_age + kalshi.STALE
+                            ),
+                        )
                     )
                     if rate
-                    else None,
-                },
-                history=deque(maxlen=self.window_minutes * 60 // kalshi.INTERVAL + 2),
-            )
-        return chosen
+                    else None
+                ),
+            },
+            history=deque(maxlen=self.window_minutes * 60 // kalshi.INTERVAL + 2),
+        )
 
     @staticmethod
     def read_depth(candidate, reply):
