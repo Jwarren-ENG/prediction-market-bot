@@ -51,6 +51,45 @@ class DesktopServiceTest(unittest.TestCase):
         conn.close()
         return status, data
 
+    def test_portfolio_chart_requests_are_private_scoped_and_opt_in(self):
+        self.assertNotIn("portfolio_history", json.loads(self.api("/api/bitcoin")[1]))
+        for route, account in [("bitcoin", "kalshi"), ("bitcoin", "polymarket_us"),
+                               ("bitcoin", "polymarket_us_hourly"), ("bitcoin", "spot"),
+                               ("bitcoin", "bitcoin_total"), ("state", "weather")]:
+            with self.subTest(account=account):
+                path = f"/api/{route}?equity={account}&minutes=240"
+                self.assertEqual(self.api(path, private=False)[0], 401)
+                status, raw = self.api(path)
+                self.assertEqual(status, 200)
+                snapshot = json.loads(raw)
+                chart = snapshot["portfolio_history"]
+                expected = snapshot["mode"] if account == "weather" else account
+                self.assertEqual(chart["account"], expected)
+                self.assertEqual(chart["minutes"], 240)
+                if account == "weather":
+                    cents = snapshot["portfolio"]["equity_cents"]
+                elif account == "bitcoin_total":
+                    cents = snapshot["bitcoin"]["portfolio"]["equity_cents"] + sum(
+                        row["portfolio"]["equity_cents"] for row in snapshot["bitcoin_brokers"].values())
+                elif account == "spot":
+                    cents = snapshot["bitcoin"]["portfolio"]["equity_cents"]
+                else:
+                    cents = snapshot["bitcoin_brokers"][account]["portfolio"]["equity_cents"]
+                self.assertEqual(chart["points"][-1][1], cents)
+        for path in ["/api/state?equity=spot&minutes=15", "/api/bitcoin?equity=kalshi&minutes=16",
+                     "/api/comparison?equity=spot&minutes=15", "/api/bitcoin?minutes=240",
+                     "/api/bitcoin?equity=kalshi&equity=spot&minutes=60"]:
+            self.assertEqual(self.api(path)[0], 400)
+
+    def test_combined_bitcoin_history_requires_every_account_and_survives_missing_marks(self):
+        self.desk.record_portfolios()
+        with patch.object(self.desk.bitcoin, "current_equity", return_value=None):
+            self.desk.record_portfolios()
+        self.desk.record_portfolios()
+        with self.desk.store.connection() as db:
+            rows = [r[0] for r in db.execute("SELECT equity FROM portfolio_marks ORDER BY at")]
+        self.assertEqual(rows[-3:], [4_000_000, None, 4_000_000])
+
     def test_private_state_is_token_scoped_and_never_contains_the_access_key(self):
         self.assertEqual(self.api("/api/state", private=False)[0], 401)
         status, raw = self.api("/api/state")

@@ -2,6 +2,7 @@ import {marketActivity} from './activity.js';
 import {historyPanel, receiptRows} from './activity-history.js';
 import {age, arr, button, count, dash, day, emptyBox, esc, field, headline, human, icon, instant, money, num, price, sideName, sourceLink, scanButton, displayTimeZone, timeZoneChoices, stamp, text, tone} from './common.js';
 import {recentEntries} from './research.js';
+import {portfolioChart} from './portfolio-chart.js';
 
 function table(headers, rows, label) {
   return `<div class="table-scroll" tabindex="0" role="region" aria-label="${esc(label)}"><table class="data-table"><thead><tr>${headers.map(s => `<th scope="col">${esc(s)}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`;
@@ -35,7 +36,7 @@ function scorecard(state) {
     <dl class="budget-line">${field('Station model',score(s.model_brier))}${field('Market midpoint',score(s.market_brier))}${field('Climatology',score(s.climatology_brier))}</dl>
     <p class="secondary-copy">Lower Brier scores indicate more accurate probabilities. Each resolved date carries equal weight.</p></div>`);
 }
-export function portfolioView(state) {
+export function portfolioView(state,ui={}) {
   const p = state.portfolio || {};
   const positions = arr(p.positions);
   const orders = arr(p.orders);
@@ -55,6 +56,7 @@ export function portfolioView(state) {
     `<tr><th scope="row">${esc(r.market_id || r.id)}</th><td>${esc(sideName(r.side) || dash)}</td><td class="numeric">${count(r.outstanding_qty)}</td><td class="numeric">${money(r.reserved_cents)}</td><td>${esc(human(r.status) || dash)}${r.cancel_requested ? ' · Cancellation requested' : ''}</td></tr>`), 'Outstanding paper orders') : '<p class="compact-empty">No outstanding orders.</p>';
   const eRows = events.map(e => `<tr><th scope="row">${esc(e.event_id)}</th><td class="numeric">${money(e.charged_exposure_cents)}</td><td class="numeric">${money(e.worst_case_cents)}</td></tr>`);
   return `${headline('Portfolio', `${esc(modeLabel(state))} <span class="context-divider">/</span> ${esc(tradingRecord)}`)}
+    ${portfolioChart(state,ui,'weather')}
     <dl class="account-strip">${metric('Starting paper cash', money(p.initial_cash_cents))}${metric('Marked equity', money(p.equity_cents))}
       ${metric('Net gain or loss', money(p.net_pnl_cents,true),tone(p.net_pnl_cents))}${metric('Realized P&L', money(p.realized_cents,true),tone(p.realized_cents))}</dl>
     ${p.stale_marks ? `<div class="inline-alert">${icon('warn',18)}${esc(count(p.stale_marks))} stale ${p.stale_marks === 1 ? 'mark' : 'marks'}. Review marked values before using equity.</div>` : ''}

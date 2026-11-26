@@ -17,7 +17,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR, ROUND
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import weather
+from . import equity as equity_history, weather
 
 INITIAL = 1_000_000
 FRESH = 20
@@ -608,7 +608,7 @@ class BTCBroker:
         last = db.execute("SELECT * FROM marks ORDER BY at DESC LIMIT 1").fetchone()
         if not last or (
             at >= last["at"]
-            and (force or last["at"][:16] != at[:16] or bool(last["unmarked"]) != bool(unknown))
+            and (force or last["at"][:16] != at[:16] or last["equity"] != equity or bool(last["unmarked"]) != bool(unknown))
         ):
             db.execute("INSERT OR REPLACE INTO marks VALUES(?,?,?,?)", (at, equity, p["cash_cents"], unknown))
             db.execute("DELETE FROM marks WHERE at<?", (weather.iso(t - timedelta(days=8)),))
@@ -1094,11 +1094,19 @@ class BTCBroker:
             denominator="Expired or settled, fully closed traded windows, including break-even windows.",
         )
 
-    def state(self, now=None):
+    def current_equity(self, now):
+        with self._db() as db:
+            return self._portfolio(db, now)["equity_cents"]
+
+    def state(self, now=None, *, equity_minutes=None):
         t = _now(now)
         with self._db() as db:
             acc = db.execute("SELECT * FROM account").fetchone()
             portfolio = self._portfolio(db, t)
+            chart = {}
+            if equity_minutes:
+                chart["portfolio_history"] = equity_history.history(
+                    db, self.venue, equity_minutes, t, portfolio["equity_cents"], contract=True)
             b = self._book_for_mark(db, t)
             markets = []
             if acc["current_market"]:
@@ -1147,6 +1155,7 @@ class BTCBroker:
             return dict(
                 venue=self.venue,
                 auto_enabled=bool(acc["auto"]),
+                **chart,
                 limits=json.loads(acc["limits"]),
                 max_limits=HARD_LIMITS.copy(),
                 rule=RULE,

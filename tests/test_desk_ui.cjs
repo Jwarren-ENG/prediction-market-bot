@@ -172,3 +172,43 @@ test('Bitcoin portfolio, research, activity and independent comparison tab disti
   html=bitcoinAccountView(state,{...ui,btcView:'Worker'});for(const v of Object.keys(state.bitcoin_brokers))assert.match(html,new RegExp('data-btc-risk="'+v+'"'));
   const compare=comparisonView({...state,comparison:{accounts:{},bitcoin_managed:true}},ui);assert.match(compare,/Bitcoin contract trials/);assert.match(compare,/managed spot account includes manual/);assert.doesNotMatch(compare,/data-btc-risk|data-btc-ticket/);
 });
+
+test('portfolio line uses dollar equity, signed period return and separate segments', async () => {
+  const {equityPlot,portfolioChart} = await import('../ui/portfolio-chart.js');
+  const end=Date.UTC(2026,10,26,21), beginning=end-120000;
+  const series={account:'kalshi',minutes:240,start_ms:end-14400000,end_ms:end,first_at:new Date(beginning).toISOString(),
+    current_cents:999999,has_gaps:true,points:[[beginning,1000000,0],[beginning+30000,1000002,0],[end,999999,1]]};
+  const model=equityPlot(series);
+  assert.equal(model.start,beginning);
+  assert.equal(model.x(beginning),0);
+  assert.equal(model.x(end),100);
+  assert.ok(model.y(999999)>model.y(1000002));
+  assert.ok(model.ticks.every(Number.isInteger));
+  const html=portfolioChart({portfolio_history:series},{equityAccount:'kalshi'},'bitcoin');
+  assert.match(html,/−\$0\.01 \(−0\.0001%\)/);
+  assert.match(html,/equity-single" d="M1000/);
+  assert.match(html,/aria-label="1 week"/);
+  assert.match(html,/Breaks in the line/);
+  assert.match(html,/\$9,999\.99/);
+  const pending=portfolioChart({portfolio_history:series},{equityAccount:'polymarket_us'},'bitcoin');
+  assert.match(pending,/Loading the recorded line/);
+  assert.doesNotMatch(pending,/9,999/);
+  const missing=portfolioChart({portfolio_history:{...series,current_cents:null}},{},'bitcoin');
+  assert.match(missing,/Last known value/);
+  assert.doesNotMatch(missing,/−0\.0001%/);
+});
+
+test('unchanged and single portfolio valuations have a legible scale and truthful change', async () => {
+  const {equityPlot,portfolioChart}=await import('../ui/portfolio-chart.js');
+  const end=Date.UTC(2026,10,26,22);
+  const series={account:'replay',minutes:15,start_ms:end-900000,end_ms:end,first_at:new Date(end).toISOString(),current_cents:1000000,points:[[end,1000000,0]]};
+  const model=equityPlot(series);
+  assert.ok(model.y(1000000)>0 && model.y(1000000)<100);
+  let html=portfolioChart({mode:'replay',portfolio_history:series},{equityMinutes:15},'weather');
+  assert.match(html,/First valuation recorded/);
+  assert.match(html,/Replay valuation/);
+  assert.doesNotMatch(html,/\(0%\)/);
+  series.points.unshift([end-30000,1000000,0]);
+  html=portfolioChart({mode:'replay',portfolio_history:series},{equityMinutes:15},'weather');
+  assert.match(html,/\$0\.00 \(0%\)/);
+});

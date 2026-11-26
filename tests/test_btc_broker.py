@@ -106,6 +106,18 @@ class BrokerTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.paper = broker.BTCBroker(self.dir)
 
+    def test_portfolio_chart_moves_on_a_new_bid_between_fills(self):
+        self.paper.sync(feed(), now=T)
+        self.paper.place(order(), feed(), T + timedelta(seconds=1))
+        later = T + timedelta(seconds=8)
+        self.paper.sync(feed(now=later, yes=((57,40),), no=((39,40),)), now=later)
+        state = self.paper.state(later + timedelta(seconds=1), equity_minutes=15)
+        self.assertEqual(state["portfolio"]["filled_orders"], 1)
+        values = [p[1] for p in state["portfolio_history"]["points"]]
+        self.assertLess(values[1], values[0])
+        self.assertGreater(values[2], values[1])
+        self.assertEqual(values[-1], state["portfolio"]["equity_cents"])
+
     def test_separate_accounts_manual_fee_marks_and_restart(self):
         for key in broker.PRODUCTS:
             with self.subTest(key=key):
@@ -119,9 +131,13 @@ class BrokerTests(unittest.TestCase):
                 self.assertEqual(filled["fee_cents"], 4 if key == "kalshi" else 5)
                 fee = filled["fee_cents"]
                 self.assertEqual(filled["cash_delta_cents"], -102 - fee)
-                state = broker.BTCBroker(self.dir, key).state(T)
+                state = broker.BTCBroker(self.dir, key).state(T, equity_minutes=60)
                 self.assertEqual(state["portfolio"]["cash_cents"], 1_000_000 - 102 - fee)
                 self.assertEqual(state["portfolio"]["equity_cents"], 1_000_000 - 4 - 2 * fee)
+                self.assertEqual(state["portfolio_history"]["points"][-1][1], 1_000_000 - 4 - 2 * fee)
+                stale = desk.state(T + timedelta(seconds=90), equity_minutes=60)["portfolio_history"]
+                self.assertIsNone(stale["current_cents"])
+                self.assertTrue(stale["has_gaps"])
                 self.assertEqual(state["positions"][0]["auto_qty"], 0)
                 self.assertEqual(state["daily"]["net_gain_cents"], -4 - 2 * fee)
                 self.assertEqual(state["daily"]["fees_cents"], fee)

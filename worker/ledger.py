@@ -23,7 +23,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import monitoring
+from . import equity, monitoring
 
 
 MAX_QTY = 100
@@ -431,6 +431,7 @@ class Ledger:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        self.db.execute(equity.SCHEMA)
         self.db.execute(
             "INSERT OR IGNORE INTO account(id, initial_cash, day_start, peak, equity) VALUES(1,?,?,?,?)",
             (initial_cash_cents,) * 4,
@@ -600,6 +601,16 @@ class Ledger:
             if require_known_at and last_event and _dt(last_event) > now:
                 return None
             return self._portfolio(now)
+
+    def sample_equity(self, now):
+        with self._transaction():
+            mark = self._portfolio(now)
+            equity.record(self.db, _utc(now.isoformat()), mark["equity_cents"] if monitoring.comparable_weather(mark) else None)
+
+    def import_equity(self, rows):
+        with self._transaction():
+            if not self._one("SELECT 1 FROM portfolio_marks LIMIT 1"):
+                self.db.executemany("INSERT OR IGNORE INTO portfolio_marks VALUES(?,?)", rows)
 
     def _verdict(self, row, value, at):
         prior = json.loads(row["verdict"])
@@ -880,6 +891,7 @@ class Ledger:
     def _risk(self, at):
         account = self._account()
         p = self._portfolio(_dt(at))
+        equity.record(self.db, at, p["equity_cents"] if monitoring.comparable_weather(p) else None)
         self.db.execute(
             "UPDATE account SET peak=max(peak,?),equity=? WHERE id=1",
             (p["equity_cents"], p["equity_cents"]),
@@ -1517,7 +1529,7 @@ class Ledger:
                 self._one("SELECT * FROM settlements WHERE market_id=?", market_id)
             )
 
-    def state(self, now=None):
+    def state(self, now=None, *, equity_minutes=None, equity_account=None):
         with self._transaction(write=False):
             account = self._account()
             if now is not None:
@@ -1607,9 +1619,15 @@ class Ledger:
                     "SELECT * FROM activity ORDER BY at DESC,rowid DESC LIMIT 500"
                 )
             ]
+            portfolio = self._portfolio(instant)
+            chart = {}
+            if equity_minutes:
+                current = portfolio["equity_cents"] if monitoring.comparable_weather(portfolio) else None
+                chart["portfolio_history"] = equity.history(self.db, equity_account, equity_minutes, instant, current, gap_seconds=420)
             return {
                 "markets": markets,
-                "portfolio": self._portfolio(instant),
+                "portfolio": portfolio,
+                **chart,
                 "activity": activity,
                 "paused": paused,
                 "scorecard": self._scorecard(account["source"]),

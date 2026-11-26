@@ -6,6 +6,7 @@ import {bitcoinCountdown, bitcoinPanels, bitcoinRanges, bitcoinView, comparisonV
 import {bitcoinAccountView} from './bitcoin-account.js';
 import {createOrderId, defaultTicketLimit, loadPendingOrders, makeOrder, riskPayload, savePendingOrders, ticketDraft, ticketFeedback, updateTicket, venues} from './bitcoin-trading.js';
 import {isUtcDisplay, utcClock} from './time.js';
+import {equityAccounts, equityWindows, installEquityInspector} from './portfolio-chart.js';
 
 const links = ['Markets', 'Research', 'Portfolio', 'Activity', 'Worker'];
 const titles = {Markets:'Markets', Research:'Research inbox', Portfolio:'Portfolio', Activity:'Activity', Worker:'Worker'};
@@ -22,6 +23,8 @@ const ui = {
   btcPanel:bitcoinPanels.has(preference('pmb.bitcoinPanel')) ? preference('pmb.bitcoinPanel') : 'contracts',
   btcDrafts:new Map(), btcMessages:new Map(), btcPendingOrders:loadPendingOrders(), btcActivityFilter:'all', btcRiskDraft:{},
   activityHours:24, btcRange:1440,
+  equityAccount:equityAccounts.has(preference('pmb.equityAccount')) ? preference('pmb.equityAccount') : 'kalshi',
+  equityMinutes:equityWindows.has(Number(preference('pmb.equityMinutes'))) ? Number(preference('pmb.equityMinutes')) : 240,
   view:'Research', selected:null, filter:'All decisions', tab:'Decision', mobileDetail:false,
   quoteSelected:null, quoteMobileDetail:false, quoteRange:defaultQuoteRange, paperSwitchPending:false,
   activityFilter:'All events', provider:null, connectionError:'', busy:false,
@@ -41,6 +44,11 @@ let token = '';
 let successTimer;
 let lastClosedWindow = null;
 const el = id => document.getElementById(id);
+const restoreEquityCursor=installEquityInspector(()=>{
+  const data=ui.desk==='bitcoin'?bitcoinState:state;
+  const s=data?.portfolio_history, account=ui.desk==='bitcoin'?ui.equityAccount:data?.mode;
+  return s?.account===account && s?.minutes===ui.equityMinutes ? s : null;
+});
 function tickClock() {
   const node = el('desk-clock');
   if (!node) return;
@@ -219,10 +227,11 @@ function render() {
     html = marketsView(state,ui,quotes);
   } else if (ui.view === 'Research') {
     html = researchView(state,ui,rows(),state.markets.find(m => m.id === ui.selected));
-  } else if (ui.view === 'Portfolio') html = portfolioView(state);
+  } else if (ui.view === 'Portfolio') html = portfolioView(state,ui);
   else if (ui.view === 'Activity') html = activityView(state,ui);
   else html = workerView(state,ui);
   paint('workspace',html);
+  restoreEquityCursor();
   const status = !workerHealth && !ui.contactError ? 'Connecting' : !ui.connected ? 'Worker disconnected' : late ? 'Heartbeat overdue' : 'Worker connected';
   const footer = ui.comparing ? 'Paper portfolios' : weather ? (state ? modeLabel(state) + (state.paused ? ' · Entries paused' : '') : 'Weather') : ui.desk === 'bitcoin' ? 'Bitcoin' : 'Options · Coming soon';
   paint('statusbar',`<div class="status-inner"><span class="connection-status"><i class="state-symbol ${ui.healthTone}" aria-hidden="true"></i>${status}</span>
@@ -270,7 +279,10 @@ async function refresh(force = false) {
   pendingRead = controller;
   try {
     const desk = ui.comparing ? 'comparison' : ui.desk;
-    const route = desk === 'weather' ? 'state' + (ui.view === 'Activity' ? `?activity_hours=${ui.activityHours}` : '') : desk === 'options' ? 'status' : desk;
+    let route = desk === 'weather' ? 'state' + (ui.view === 'Activity' ? `?activity_hours=${ui.activityHours}` : '') : desk === 'options' ? 'status' : desk;
+    if ((desk==='bitcoin' && ui.btcView==='Portfolio') || (desk==='weather' && ui.view==='Portfolio')) {
+      route+='?'+new URLSearchParams({equity:desk==='weather'?'weather':ui.equityAccount,minutes:ui.equityMinutes});
+    }
     const next = await api('/api/'+route,{controller});
     if (version !== requestVersion) return false;
     if (!next?.health?.heartbeat) throw new Error('The worker returned an incomplete snapshot.');
@@ -378,7 +390,7 @@ function navigate(view) {
   render();
   window.scrollTo(0,0);
   el('view-title')?.focus({preventScroll:true});
-  if (returning || view === 'Activity') void refresh(true);
+  if (returning || view === 'Activity' || view === 'Portfolio') void refresh(true);
 }
 function switchWorkspace(desk,compare=false) {
   if (!Object.hasOwn(desks,desk)) return;
@@ -399,7 +411,7 @@ function bitcoinNavigate(view) {
   savePreference('pmb.tradingWorkspace','bitcoin');savePreference('pmb.topView','desk');savePreference('pmb.bitcoinView',view);
   ui.actionError='';ui.success='';render();window.scrollTo(0,0);
   el('view-title')?.focus({preventScroll:true});
-  if (returning) void refresh(true);
+  if (returning || view === 'Portfolio') void refresh(true);
 }
 function choose(id, open = true) {
   if (!state?.markets.some(m => m.id === id)) return;
@@ -509,6 +521,9 @@ document.addEventListener('click',event => {
   }
   else if (name === 'select-quote') chooseQuote(value);
   else if (name === 'quote-range' && quoteRanges.has(Number(value))) { ui.quoteRange = Number(value);render(); }
+  else if (name === 'equity-range' && equityWindows.has(Number(value))) {
+    ui.equityMinutes=Number(value);savePreference('pmb.equityMinutes',value);render();void refresh(true);
+  }
   else if (name === 'quote-list') {
     ui.quoteMobileDetail = false;render();
     document.querySelector('.quote-link[aria-pressed="true"]')?.focus();
@@ -556,6 +571,11 @@ document.addEventListener('change',event => {
     return;
   }
   switch (field.id) {
+    case 'equity-account':
+      if (equityAccounts.has(field.value)) {
+        ui.equityAccount=field.value;savePreference('pmb.equityAccount',field.value);render();void refresh(true);
+      }
+      break;
     case 'strategy-desk':
       switchWorkspace(field.value);break;
     case 'decision-filter':

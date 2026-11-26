@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from . import equity as equity_history
+
 UTC = timezone.utc
 DAY, HOUR = 86400, 3600
 START_CENTS, MAX_ENTRY_CENTS = 1_000_000, 50_000
@@ -334,6 +336,11 @@ class BitcoinPaper:
                 CREATE TABLE IF NOT EXISTS marks(bucket INTEGER,baseline INTEGER,at TEXT,equity INTEGER,hold INTEGER,
                     PRIMARY KEY(bucket,baseline));"""
             )
+            db.execute(equity_history.SCHEMA)
+            if not db.execute("SELECT 1 FROM portfolio_marks LIMIT 1").fetchone():
+                db.execute("""INSERT OR REPLACE INTO portfolio_marks SELECT at,equity FROM marks
+                              WHERE bucket>=? ORDER BY bucket,baseline DESC""",
+                           (int(clock().timestamp()) // 300 - 8*288,))
             for name in ("strategy", "hold"):
                 db.execute(
                     "INSERT OR IGNORE INTO accounts(name,cash,equity,peak) VALUES(?,?,?,?)",
@@ -809,6 +816,8 @@ class BitcoinPaper:
         for name in ("strategy", "hold"):
             a = self._account(db, name)
             if a["sats"] > self._depth_left(db, a, "sell", book):
+                if name == "strategy":
+                    equity_history.record(db, stamp(now), None)
                 continue
             liquid = (
                 cash_terms("sell", a["sats"], book["bid_usd"])[0] if a["sats"] else 0
@@ -821,6 +830,8 @@ class BitcoinPaper:
                 (equity, book["observed_at"], peak, drawdown, name),
             )
             values.append(equity)
+            if name == "strategy":
+                equity_history.record(db, stamp(now), equity)
         if len(values) == 2:
             db.execute(
                 "INSERT OR REPLACE INTO marks VALUES(?,?,?,?,?)",
@@ -841,7 +852,23 @@ class BitcoinPaper:
                 if self._wake.is_set() or stop_event.wait(0.5):
                     break
 
-    def state(self):
+    @staticmethod
+    def _mark_fresh(account, quote):
+        return not account["sats"] or bool(quote and quote["fresh"] and quote["observed_at"] == account["marked"])
+
+    def current_equity(self, now):
+        with closing(self._db()) as db:
+            db.execute("BEGIN")
+            account = self._account(db, "strategy")
+            if not account["sats"]:
+                return account["cash"]
+            quote = self._get(db, "quote")
+            if quote:
+                enabled = db.execute("SELECT enabled FROM trial WHERE id=1").fetchone()[0]
+                quote["fresh"] = self.online and enabled and quote_fresh(quote, now)
+            return account["equity"] if self._mark_fresh(account, quote) else None
+
+    def state(self, *, equity_minutes=None):
         now = clock()
         with closing(self._db()) as db, db:
             db.execute("BEGIN")
@@ -883,10 +910,7 @@ class BitcoinPaper:
                     filled_orders=a["fills"],
                     max_drawdown_pct=a["drawdown"],
                     marked_at=a["marked"],
-                    mark_fresh=not a["sats"]
-                    or bool(
-                        quote and quote["fresh"] and quote["observed_at"] == a["marked"]
-                    ),
+                    mark_fresh=self._mark_fresh(a, quote),
                 )
 
             activities = []
@@ -920,6 +944,12 @@ class BitcoinPaper:
                         quote_at=x["quote_at"],
                     )
                 )
+            strategy = holdings("strategy")
+            chart = {}
+            if equity_minutes:
+                current = strategy["equity_cents"] if strategy["mark_fresh"] else None
+                chart["portfolio_history"] = equity_history.history(
+                    db, "spot", equity_minutes, now, current, gap_seconds=420)
             return dict(
                 source="Bitstamp",
                 product="BTC/USD",
@@ -940,7 +970,8 @@ class BitcoinPaper:
                 started_at=trial["started"],
                 quote=quote,
                 signal=signal,
-                portfolio=holdings("strategy"),
+                portfolio=strategy,
+                **chart,
                 benchmark=holdings("hold"),
                 hourly=hourly,
                 history=[
