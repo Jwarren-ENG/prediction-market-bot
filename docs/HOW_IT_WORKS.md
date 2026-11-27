@@ -18,7 +18,7 @@ The Central Park weather workspace follows one Kalshi series. The Bitcoin worksp
 
 Open **Portfolio** in either trading workspace. The large figure is the selected paper account’s cash plus the marked value of its open positions, with modeled execution costs included. Its change in dollars and percent starts at the first complete valuation visible in the selected window. An all-cash account stays flat when its underlying market moves. A single point means the account has one complete valuation in view.
 
-**Bitcoin** offers Kalshi 15-minute, Polymarket US 5-minute, Polymarket US hourly, Bitstamp spot, and a combined total. The total adds the four active accounts and excludes the passive benchmark. It starts with the first joint observation by version 0.4.0. Each individual chart can also show eligible history recorded by earlier versions. **Central Park weather** uses the selected forward or replay ledger. Replay follows its fixture clock.
+**Bitcoin** offers the active personal bankroll, Kalshi 15-minute, Polymarket US 5-minute, Polymarket US hourly, Bitstamp spot, and a combined total. The combined trial total adds the three $10,000 contract trials and the spot strategy. The personal bankroll and passive benchmark have separate histories. It starts with the first joint observation by version 0.4.0. Each individual chart can also show eligible history recorded by earlier versions. **Central Park weather** uses the selected forward or replay ledger. Replay follows its fixture clock.
 
 Use **15m**, **1h**, **4h**, **1D**, **48h**, or **1W** for a rolling window. The chart fits the available history and its dollar scale to the recorded range. The dashed horizontal line marks the first visible valuation. Move the pointer or tap to read a point. With the chart focused, Left and Right step through displayed points, Home and End jump to the edges, and Escape returns to the latest reading. The readout includes the selected time zone and UTC.
 
@@ -29,6 +29,24 @@ The open app polls its worker about every five seconds. The worker records chang
 The top-left selector opens either trading desk or the Options development screen. Compare is its own top-level tab and reads the cross-account ledger. The worker stores Bitcoin balances and orders separately. The spot automation buys only when the most recent completed UTC daily close exceeds the completed close seven days earlier. Eight consecutive closes are required. It checks Bitstamp’s displayed size, buys at the ask and sells at the bid, and applies 0.60% in fees and 0.05% in additional adverse execution per side. These are test assumptions. Each new position uses up to 5% of current equity with a $500 cap including fees. While long, it holds its original BTC quantity until the signal calls for cash. The passive account buys the same initial dollar amount once. [Strategy and historical protocol](BITCOIN_RESEARCH.md) · [BTC worker](../worker/bitcoin.py) · [Exchange market data](https://www.bitstamp.net/api/)
 
 The common comparison records up to one observation per five minutes. It starts from recorded balances on the same date, includes entry costs when both trials start together, and skips intervals without sufficient current quoted depth to value either account. It reports change from that common starting equity and the largest peak-to-trough dollar decline across recorded marks. A paused strategy still has its actual cash and holdings. No ranking is available before the accounts have overlapping observations. [Monitoring calculations](../worker/monitoring.py)
+
+## Personal Bitcoin paper bankroll
+
+**Bitcoin → Portfolio → My paper bankroll** opens a dedicated forward trial. The default is $25 on Kalshi 15-minute Bitcoin. A single selected trial can run at a time. Each combination of venue, interval and starting balance keeps its own positions, cash, fees and history. Changing the selection loads the saved ledger for that combination. The app permits a switch after all open contracts sell or settle and starts the selected trial with entries paused. Reopening the app resumes the active trial’s saved setting. The market tickets and comparison accounts are independent.
+
+The entry rule uses the same timestamped momentum observations and exit conditions as the comparison contracts. The number of contracts changes with the balance and the book. These percentage limits are experimental settings.
+
+| At the start of a trial | $25 | $50 | $100 |
+| --- | ---: | ---: | ---: |
+| Maximum premium plus entry fees | $1.25 | $2.50 | $5.00 |
+| Maximum combined open cost at entry | $2.50 | $5.00 | $10.00 |
+| Maximum loss against the Eastern day opening | $2.50 | $5.00 | $10.00 |
+
+The worker recalculates the per-entry and open-cost ceilings at 5% and 10% of current executable equity, rounded down to cents. The daily ceiling uses 10% of that day’s opening risk basis. Open contracts count at their full premium and entry fees toward remaining risk. If an opening valuation is unavailable with a position carried across midnight, the daily check uses the conservative maximum opening payout. A missing liquidation price blocks additional purchases. A profitable day can spend its gains while staying above the day’s loss floor. A losing day has less room.
+
+The worker checks whole quantities at current posted depth and skips a signal if one contract plus its modeled fee exceeds the remaining budget. It also checks that the move clears the modeled cost of entering and liquidating that quantity. For example, at a single 64¢ ask with a 0.07 Kalshi fee coefficient, one contract costs 66¢ with the fee. Two cost $1.32 and exceed the initial $25 trial’s $1.25 entry budget. Seven cost $4.60 in a $100 trial. These are illustrative fills conditional on a qualifying signal, fresh bids and offers, and sufficient depth.
+
+**Automate entries** pauses new purchases. Existing automatic positions can still exit against fresh quotes or settle on the official result. The bankroll panel explains the current entry condition and lists recent fills. Choose **My paper bankroll** in **Activity** for fills, settings and settlement receipts. Fees and changes of a few cents appear in the portfolio value chart.
 
 ## Bitcoin contract paper trading
 

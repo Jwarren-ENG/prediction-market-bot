@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 from . import equity as equity_history, weather
 
 INITIAL = 1_000_000
+BANKROLL_PRESETS = (2500, 5000, 10000)
 FRESH = 20
 SIDES = ("yes", "no")
 PRODUCTS = {
@@ -45,7 +46,7 @@ RULE = (
     "Experimental venue-book momentum. Three consecutive two-sided quotes over 20–45 seconds "
     "must move in one direction by at least 6¢, with no gap over 20 seconds and each spread at most "
     "2¢. The selected side must be at 55–80¢ and its move must exceed spread plus estimated "
-    "round-trip fees. With at least 60 seconds left, buy up to five contracts once per window. "
+    "round-trip fees. With at least 60 seconds left, buy {size} once per window. "
     "Sell automatic holdings when their midpoint falls to 50¢, the executable gain after fees "
     "reaches 8¢ per contract, or 30 seconds remain. Unfilled positions await the official result."
 )
@@ -379,14 +380,20 @@ def _signal(b, t):
 
 
 class BTCBroker:
-    """One venue product, one SQLite file, one $10,000 practice account."""
+    """One venue product and starting balance per independent paper ledger."""
 
-    def __init__(self, directory, venue="kalshi"):
+    def __init__(self, directory, venue="kalshi", *, starting_cents=INITIAL):
         if venue not in PRODUCTS:
             raise ValueError("Unknown BTC paper account.")
+        if type(starting_cents) is not int or starting_cents not in (*BANKROLL_PRESETS, INITIAL):
+            raise ValueError("Choose a supported starting paper balance.")
+        self.starting_cents = starting_cents
+        self.personal = starting_cents != INITIAL
         self.venue = venue
         self.exchange = PRODUCTS[venue][0]
         directory = Path(directory)
+        if self.personal:
+            directory = directory / "btc-bankroll" / str(starting_cents)
         directory.mkdir(parents=True, exist_ok=True)
         self.path = directory / f"btc-contract-paper-{venue}.sqlite"
         with closing(self._connect()) as db:
@@ -394,12 +401,15 @@ class BTCBroker:
             db.executescript(SCHEMA)
             db.execute("BEGIN IMMEDIATE")
             self._upgrade(db)
+            if "initial_cents" not in {r[1] for r in db.execute("PRAGMA table_info(account)")}:
+                db.execute("ALTER TABLE account ADD COLUMN initial_cents INTEGER NOT NULL DEFAULT 1000000")
             db.execute(
-                "INSERT OR IGNORE INTO account(id,venue,cash,limits) VALUES(1,?,?,?)",
-                (venue, INITIAL, _json(LIMITS)),
+                "INSERT OR IGNORE INTO account(id,venue,cash,initial_cents,peak,limits) VALUES(1,?,?,?,?,?)",
+                (venue, starting_cents, starting_cents, starting_cents, _json(LIMITS)),
             )
-            if db.execute("SELECT venue FROM account").fetchone()[0] != venue:
-                raise ValueError("The BTC account file belongs to another venue.")
+            identity = db.execute("SELECT venue,initial_cents FROM account").fetchone()
+            if tuple(identity) != (venue, starting_cents):
+                raise ValueError("The BTC account file belongs to another venue or starting balance.")
             db.commit()
 
     @staticmethod
@@ -551,13 +561,13 @@ class BTCBroker:
         equity = None if unknown else acc["cash"] + sum(p["mark_value_cents"] for p in positions)
         filled = db.execute("SELECT COUNT(*) FROM orders WHERE filled=1").fetchone()[0]
         return dict(
-            initial_cash_cents=INITIAL,
+            initial_cash_cents=self.starting_cents,
             cash_cents=acc["cash"],
             equity_cents=equity,
             realized_cents=acc["realized"],
             open_cost_cents=cost,
             filled_orders=filled,
-            net_gain_cents=equity - INITIAL if equity is not None else None,
+            net_gain_cents=equity - self.starting_cents if equity is not None else None,
             unrealized_cents=equity - acc["cash"] - cost if equity is not None else None,
             unmarked_positions=unknown,
             positions=positions,
@@ -644,12 +654,29 @@ class BTCBroker:
             return json.loads(old["receipt"])
         return None
 
-    def _risk(self, db, order, delta, t, limits):
+    def _bankroll_budget(self, db, p, t, market=None):
+        """Size in whole cents against the latest liquidation mark and Eastern day opening."""
+        day = db.execute("SELECT risk_opening FROM days WHERE day=?", (_day(t),)).fetchone()
+        opening = day[0] if day else (None if p["positions"] else p["cash_cents"])
+        equity = p["equity_cents"] or 0
+        order_cap = equity * 5 // 100
+        open_cap = equity // 10
+        daily_cap = (opening or 0) // 10
+        # Cash already excludes all outstanding premiums and fees. Treat every open
+        # contract as a total loss when computing what can still be risked today.
+        daily_room = max(0, p["cash_cents"] + daily_cap - opening) if opening is not None else 0
+        window_cost = sum(pos["cost_cents"] for pos in p["positions"] if pos["market_id"] == market)
+        room = max(0, min(order_cap - window_cost, open_cap - p["open_cost_cents"], daily_room, p["cash_cents"]))
+        limits = dict(max_order_qty=HARD_LIMITS["max_order_qty"], max_order_cents=order_cap,
+                      max_window_cents=order_cap, max_open_cents=open_cap, daily_loss_cents=daily_cap)
+        return limits, dict(entry_room_cents=room, daily_room_cents=daily_room, day_opening_cents=opening)
+
+    def _risk(self, db, order, delta, t, limits, portfolio=None):
         if order["qty"] > limits["max_order_qty"]:
             raise ValueError("Quantity exceeds the account's per-order limit.")
         if order["action"] != "buy":
             return
-        p = self._portfolio(db, t)
+        p = portfolio if portfolio is not None else self._portfolio(db, t)
         cost = -delta
         window_cost = sum(x["cost_cents"] for x in p["positions"] if x["market_id"] == order["market_id"])
         if cost > p["cash_cents"]:
@@ -728,8 +755,12 @@ class BTCBroker:
             levels, price, fee, delta = _walk(
                 db, self.exchange, b, action, side, qty, _price(order["limit_cents"])
             )
-            limits = json.loads(db.execute("SELECT limits FROM account").fetchone()[0])
-            self._risk(db, order, delta, t, limits)
+            portfolio = self._portfolio(db, t) if self.personal else None
+            if self.personal:
+                limits, budget = self._bankroll_budget(db, portfolio, t, mid)
+            else:
+                limits = json.loads(db.execute("SELECT limits FROM account").fetchone()[0])
+            self._risk(db, order, delta, t, limits, portfolio)
             realized = 0
             if action == "buy":
                 self._buy(db, mid, side, owner, qty, delta)
@@ -768,7 +799,9 @@ class BTCBroker:
                 levels=[[_number(Decimal(p) / 100), n] for p, n in levels],
             )
             if owner == "auto":
-                receipt["rule_version"] = "venue-book-momentum-v1"
+                receipt["rule_version"] = "venue-book-momentum-bankroll-v1" if self.personal else "venue-book-momentum-v1"
+                if self.personal and action == "buy":
+                    receipt["entry_budget_cents"] = budget["entry_room_cents"]
                 receipt["signal_evidence"] = [
                     dict(
                         observed_at=at,
@@ -825,11 +858,15 @@ class BTCBroker:
             self._checkpoint(db, t, force=result["status"] == "filled")
             return result
 
-    def _auto(self, db, b, t):
+    def _auto(self, db, b, t, *, entries=True):
         filled = False
         market, stamp = b["id"], b["seen"]
         elapsed = (weather.instant(b["closed"]) - t).total_seconds()
-        limits = json.loads(db.execute("SELECT limits FROM account").fetchone()[0])
+        portfolio = self._portfolio(db, t) if self.personal else None
+        if self.personal:
+            limits, budget = self._bankroll_budget(db, portfolio, t, market)
+        else:
+            limits = json.loads(db.execute("SELECT limits FROM account").fetchone()[0])
         held = db.execute(
             "SELECT side,qty,cost FROM holdings WHERE market=? AND owner='auto'", (market,)
         ).fetchall()
@@ -872,7 +909,7 @@ class BTCBroker:
             if not db.execute("SELECT 1 FROM orders WHERE id=?", (order["client_id"],)).fetchone():
                 filled = self._execute(db, order, "auto", b, "", t, reason)["status"] == "filled" or filled
         if (
-            held
+            not entries or held
             or db.execute(
                 "SELECT 1 FROM orders WHERE market=? AND action='buy' AND source='auto' AND filled=1",
                 (market,),
@@ -888,7 +925,8 @@ class BTCBroker:
         # No auto fill may walk more than 1¢ beyond the actual top quote.
         best = 10000 - b["bids"][_opposite(side)][0][0]
         cap = min(9999, best + 100)
-        qty = min(5, limits["max_order_qty"], sum(n for p, n in levels if p <= cap))
+        ceiling = budget["entry_room_cents"] * 100 // best if self.personal else 5
+        qty = min(ceiling, limits["max_order_qty"], sum(n for p, n in levels if p <= cap))
         # Respect a user's reduced budget and the remaining risk room even for a single lot.
         samples = b["sample"]
         move = abs(Decimal(sum(samples[-1][2:]) - sum(samples[0][2:]))) / 200
@@ -912,6 +950,11 @@ class BTCBroker:
                     limit_cents=cap / 100,
                 )
             )
+            # Candidate sizes share one entry ID. Only persist the largest eligible size.
+            try:
+                self._risk(db, order, -debit, t, limits, portfolio)
+            except ValueError:
+                continue
             if self._execute(db, order, "auto", b, "", t, reason)["status"] == "filled":
                 return True
         return filled
@@ -967,6 +1010,34 @@ class BTCBroker:
         )
         return True
 
+    def has_holdings(self):
+        with self._db() as db:
+            return db.execute("SELECT 1 FROM holdings LIMIT 1").fetchone() is not None
+
+    def _bankroll_status(self, db, acc, b, budget, p, market):
+        if not acc["auto"]:
+            return "New entries are paused. Open positions can still exit or settle."
+        if p["unmarked_positions"]:
+            return "Waiting for a fresh liquidation price or the official result on an open position."
+        if not b:
+            return acc["gate"] or "Waiting for a fresh, verified venue book."
+        if db.execute("SELECT 1 FROM orders WHERE market=? AND action='buy' AND source='auto' AND filled=1",
+                      (b["id"],)).fetchone():
+            return "This window already has a bankroll entry. The next entry needs a new window."
+        if not budget["entry_room_cents"]:
+            return "The available entry budget is exhausted."
+        if market["signal_side"]:
+            side = market["signal_side"]
+            best = 10000 - b["bids"][_opposite(side)][0][0]
+            cap = min(9999, best + 100)
+            try:
+                cost = -_walk(db, self.exchange, b, "buy", side, 1, cap)[3]
+            except ValueError:
+                return "Waiting for at least one whole contract near the best ask."
+            if cost > budget["entry_room_cents"]:
+                return f"One {side.upper()} contract costs {cost}¢ including fees, above the remaining entry budget."
+        return market["signal"]
+
     def pending_settlements(self, now=None):
         t = weather.iso(_now(now))
         with self._db() as db:
@@ -989,8 +1060,10 @@ class BTCBroker:
             for record in settlements:
                 settled = self._settle(db, record, t) or settled
             filled = False
-            if book and allow_auto is True and db.execute("SELECT auto FROM account").fetchone()[0]:
-                filled = self._auto(db, book, t)
+            if book and allow_auto is True:
+                enabled = bool(db.execute("SELECT auto FROM account").fetchone()[0])
+                if enabled or (self.personal and db.execute("SELECT 1 FROM holdings LIMIT 1").fetchone()):
+                    filled = self._auto(db, book, t, entries=enabled)
             self._checkpoint(db, t, force=settled or filled)
 
     def set_auto(self, enabled):
@@ -1008,6 +1081,8 @@ class BTCBroker:
         return enabled
 
     def set_limits(self, limits):
+        if self.personal:
+            raise ValueError("The personal paper bankroll sizes entries from its marked equity.")
         if not isinstance(limits, dict) or not limits or not set(limits) <= LIMITS.keys():
             raise ValueError("Choose a supported paper risk limit.")
         for k, n in limits.items():
@@ -1103,10 +1178,13 @@ class BTCBroker:
         with self._db() as db:
             acc = db.execute("SELECT * FROM account").fetchone()
             portfolio = self._portfolio(db, t)
+            limits, budget = (self._bankroll_budget(db, portfolio, t, acc["current_market"]) if self.personal
+                              else (json.loads(acc["limits"]), None))
             chart = {}
             if equity_minutes:
                 chart["portfolio_history"] = equity_history.history(
-                    db, self.venue, equity_minutes, t, portfolio["equity_cents"], contract=True)
+                    db, "bankroll" if self.personal else self.venue, equity_minutes, t,
+                    portfolio["equity_cents"], contract=True)
             b = self._book_for_mark(db, t)
             markets = []
             if acc["current_market"]:
@@ -1147,6 +1225,8 @@ class BTCBroker:
                 )
                 for r in db.execute("SELECT * FROM marks ORDER BY at DESC LIMIT 180")
             ][::-1]
+            if self.personal:
+                budget["entry_status"] = self._bankroll_status(db, acc, b, budget, portfolio, markets[0] if markets else None)
             day = _day(t)
             previous = [
                 r[0]
@@ -1156,9 +1236,11 @@ class BTCBroker:
                 venue=self.venue,
                 auto_enabled=bool(acc["auto"]),
                 **chart,
-                limits=json.loads(acc["limits"]),
+                limits=limits,
+                **({"budget": budget} if self.personal else {}),
                 max_limits=HARD_LIMITS.copy(),
-                rule=RULE,
+                rule=RULE.format(size="whole contracts within the fee-inclusive entry budget"
+                                 if self.personal else "up to five contracts"),
                 fee_policy=FEES,
                 portfolio=portfolio,
                 positions=portfolio["positions"],

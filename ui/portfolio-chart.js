@@ -4,7 +4,7 @@ import {isUtcDisplay, utcClock} from './time.js';
 import {venues} from './bitcoin-trading.js';
 
 export const equityWindows = new Map([[15,'15m'],[60,'1h'],[240,'4h'],[1440,'1D'],[2880,'48h'],[10080,'1W']]);
-export const equityAccounts = new Map([['bitcoin_total','All Bitcoin accounts'],...Object.entries(venues).map(([id,v])=>[id,v.label]),['spot','Bitstamp spot']]);
+export const equityAccounts = new Map([['bankroll','My paper bankroll'],['bitcoin_total','Combined $10,000 trials'],...Object.entries(venues).map(([id,v])=>[id,v.label]),['spot','Bitstamp spot']]);
 const fullTime = at => isUtcDisplay() ? stamp(at) : stamp(at)+' · '+utcClock(at);
 const figure = new Intl.NumberFormat('en-US',{maximumFractionDigits:4});
 const percentChange = (change, initial) => initial > 0 ? ' ('+(change<0?'−':change>0?'+':'')+figure.format(Math.abs(change/initial*100))+'%)' : '';
@@ -69,7 +69,7 @@ function drawing(plot, label) {
 }
 
 export function portfolioChart(state, ui, desk) {
-  const bitcoin=desk==='bitcoin', account=bitcoin?(ui.equityAccount||'kalshi'):state.mode;
+  const bitcoin=desk==='bitcoin', account=bitcoin?(ui.equityAccount||(state.bankroll?'bankroll':'kalshi')):state.mode;
   const label=bitcoin?equityAccounts.get(account):state.mode==='replay'?'Central Park weather · Replay':'Central Park weather';
   const minutes=ui.equityMinutes||240, raw=state.portfolio_history;
   const s=raw?.account===account && raw.minutes===minutes ? raw : null;

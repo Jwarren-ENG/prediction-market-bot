@@ -32,7 +32,7 @@ from .weather import instant
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORT = 47823
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 LOG = logging.getLogger("pmb")
 
 
@@ -61,7 +61,8 @@ class Desk:
         self.online = online
         self.quotes = QuoteTape(self._quote_access, self.transition)
         self.bitcoin = BitcoinPaper(directory, online=online)
-        self.bitcoin_trials = BitcoinTrials(directory, self._quote_access, self._poly_access, self.transition)
+        self.bitcoin_trials = BitcoinTrials(directory, self._quote_access, self._poly_access,
+                                           self.transition, store=self.store)
         self.bitcoin_contracts = self.bitcoin_trials.sources["kalshi"]
         self.next_pair = 0.0
         self.interval = interval
@@ -517,6 +518,8 @@ class Desk:
     def action(self, action, value):
         with self.transition:
             mode = self.mode()
+            if action in ("btc-bankroll-auto", "btc-bankroll-profile"):
+                return self.bitcoin_trials.bankroll_action(action, value)
             if action in ("btc-contract-order", "btc-contract-auto", "btc-contract-limits"):
                 return self.bitcoin_trials.action(action, value)
             if action == "btc-spot-order":
@@ -693,7 +696,7 @@ class Handler(BaseHTTPRequestHandler):
             minutes = None
             if chart or windows:
                 accounts = {"/api/state": {"weather"},
-                            "/api/bitcoin": {"spot", "bitcoin_total", *self.server.desk.bitcoin_trials.accounts}}
+                            "/api/bitcoin": {"bankroll", "spot", "bitcoin_total", *self.server.desk.bitcoin_trials.accounts}}
                 if (len(chart) != 1 or chart[0] not in accounts.get(path, ())
                         or len(windows) != 1 or windows[0] not in {str(n) for n in equity.WINDOWS}):
                     return self.reply(400, {"error": "Choose a portfolio account and a supported time window."})
