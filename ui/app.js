@@ -23,7 +23,7 @@ const ui = {
   btcPanel:bitcoinPanels.has(preference('pmb.bitcoinPanel')) ? preference('pmb.bitcoinPanel') : 'contracts',
   btcDrafts:new Map(), btcMessages:new Map(), btcPendingOrders:loadPendingOrders(), btcActivityFilter:'all', btcRiskDraft:{},
   activityHours:24, btcRange:1440,
-  equityAccount:equityAccounts.has(preference('pmb.equityAccount')) ? preference('pmb.equityAccount') : 'kalshi',
+  equityAccount:equityAccounts.has(preference('pmb.equityAccount')) ? preference('pmb.equityAccount') : 'bankroll',
   equityMinutes:equityWindows.has(Number(preference('pmb.equityMinutes'))) ? Number(preference('pmb.equityMinutes')) : 240,
   view:'Research', selected:null, filter:'All decisions', tab:'Decision', mobileDetail:false,
   quoteSelected:null, quoteMobileDetail:false, quoteRange:defaultQuoteRange, paperSwitchPending:false,
@@ -309,6 +309,7 @@ const confirmations = {
   'btc-feed':'Bitcoin market data preference saved.', 'btc-auto':'Bitcoin paper trading preference saved.',
   'btc-poly-feed':'Polymarket US public data preference saved.', 'btc-contract-auto':'Paper automation preference saved for this account.',
   'btc-contract-limits':'Paper risk limits saved for this account.',
+  'btc-bankroll-auto':'Bankroll entry setting saved.', 'btc-bankroll-profile':'Paper bankroll selected.',
   scan:'Forward scan requested.', replay:'Offline replay processed.', pause:'Paper entries paused.', resume:'Manual pause cleared.',
   mode:'Operating mode updated.', permission:'Market data permission updated.', research:'Research requested. New notes appear in Evidence.',
   configure_research:'Analyst settings saved.', research_auto:'Automatic research preference updated.',
@@ -485,6 +486,13 @@ document.addEventListener('click',event => {
   const {action:name,value} = clickable.dataset;
   if (name === 'view') navigate(value);
   else if (name === 'btc-view') bitcoinNavigate(value);
+  else if (name === 'btc-bankroll-open') {
+    ui.equityAccount='bankroll';savePreference('pmb.equityAccount','bankroll');
+    bitcoinNavigate('Portfolio');
+  }
+  else if (name === 'btc-bankroll-auto' && ['true','false'].includes(value)) {
+    void action(name,{expected:clickable.closest('[data-bankroll-id]')?.dataset.bankrollId,enabled:value==='true'});
+  }
   else if (name === 'compare') switchWorkspace(ui.desk,true);
   else if (name === 'workspace') switchWorkspace(value);
   else if (name === 'btc-panel') selectBitcoinPanel(value);
@@ -571,6 +579,14 @@ document.addEventListener('change',event => {
     return;
   }
   switch (field.id) {
+    case 'bankroll-profile': {
+      const [venue,cents]=field.value.split(':');
+      if (Object.hasOwn(venues,venue)) {
+        ui.equityAccount='bankroll';savePreference('pmb.equityAccount','bankroll');
+        void action('btc-bankroll-profile',{expected:field.closest('[data-bankroll-id]').dataset.bankrollId,venue,starting_cents:Number(cents)});
+      }
+      break;
+    }
     case 'equity-account':
       if (equityAccounts.has(field.value)) {
         ui.equityAccount=field.value;savePreference('pmb.equityAccount',field.value);render();void refresh(true);

@@ -55,7 +55,7 @@ class DesktopServiceTest(unittest.TestCase):
         self.assertNotIn("portfolio_history", json.loads(self.api("/api/bitcoin")[1]))
         for route, account in [("bitcoin", "kalshi"), ("bitcoin", "polymarket_us"),
                                ("bitcoin", "polymarket_us_hourly"), ("bitcoin", "spot"),
-                               ("bitcoin", "bitcoin_total"), ("state", "weather")]:
+                               ("bitcoin", "bitcoin_total"), ("bitcoin", "bankroll"), ("state", "weather")]:
             with self.subTest(account=account):
                 path = f"/api/{route}?equity={account}&minutes=240"
                 self.assertEqual(self.api(path, private=False)[0], 401)
@@ -68,6 +68,9 @@ class DesktopServiceTest(unittest.TestCase):
                 self.assertEqual(chart["minutes"], 240)
                 if account == "weather":
                     cents = snapshot["portfolio"]["equity_cents"]
+                elif account == "bankroll":
+                    cents = snapshot["bankroll"]["portfolio"]["equity_cents"]
+                    self.assertEqual(cents, 2500)
                 elif account == "bitcoin_total":
                     cents = snapshot["bitcoin"]["portfolio"]["equity_cents"] + sum(
                         row["portfolio"]["equity_cents"] for row in snapshot["bitcoin_brokers"].values())
@@ -123,7 +126,7 @@ class DesktopServiceTest(unittest.TestCase):
             self.assertEqual(status, 200)
             bitcoin = json.loads(raw)
             self.assertEqual(set(bitcoin), {"version", "health", "bitcoin", "bitcoin_contracts",
-                                           "polymarket_contracts", "polymarket_hourly_contracts", "bitcoin_brokers"})
+                                           "polymarket_contracts", "polymarket_hourly_contracts", "bitcoin_brokers", "bankroll"})
             trials = bitcoin["bitcoin_brokers"]
             self.assertEqual(set(trials), {"kalshi", "polymarket_us", "polymarket_us_hourly"})
             for key, account in trials.items():

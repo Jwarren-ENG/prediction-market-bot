@@ -41,6 +41,33 @@ function recordedResearch(state,venue) {
     <dl class="field-list">${field('All completed traded windows',count(performance.closed_windows))}${field('Their net after fees',money(performance.net_cents,true))}${field('Worst recorded drawdown',money(performance.max_drawdown_cents))}</dl>
     ${m?.rules_url?`<div class="btc-source-links">${sourceLink('Venue contract rules',m.rules_url)}</div>`:''}`);
 }
+function bankrollPanel(state,ui) {
+  const b=state.bankroll;
+  if (!b || !Object.hasOwn(venues,b.venue)) return '';
+  const p=b.portfolio, feed=feedFor(state,b.venue), positions=arr(p.positions);
+  const choices=products.map(venue=>`<optgroup label="${esc(venues[venue].label)}">${b.starting_options_cents.map(cents=>{
+    const id=venue+':'+cents;
+    return `<option value="${esc(id)}"${id===b.id?' selected':''}>${esc(money(cents))} · ${esc(venues[venue].label)}</option>`;
+  }).join('')}</optgroup>`).join('');
+  const switchNote=positions.length?'You can change trials once the open contracts sell or settle.':
+    'Changing trials loads that balance’s saved history and pauses new entries.';
+  const control=autoSwitch('Automate entries','btc-bankroll-auto',ui.connected?b.auto_enabled:null,
+    ui.locked || (!b.auto_enabled && (!feed.enabled || state.health?.online===false)));
+  const fields=field('Paper cash',money(p.cash_cents))+field('Open cost',money(p.open_cost_cents))+
+    field('Equity',money(p.equity_cents))+field('Gain / loss',money(p.net_gain_cents,true))+
+    field('Per entry, including fees',money(b.limits.max_order_cents))+field('Available for this window',money(b.budget.entry_room_cents))+
+    field('Daily loss limit',money(b.limits.daily_loss_cents))+field('Daily risk room',money(b.budget.daily_room_cents));
+  const fills=arr(b.fills).map(r=>cells(stamp(r.at),[human(r.action)+' '+String(r.side).toUpperCase(),count(r.qty),price(r.price_cents),money(r.fee_cents),money(r.cash_delta_cents,true)]));
+  const holds=positions.map(r=>cells(r.market_id,[String(r.side).toUpperCase(),count(r.qty),money(r.cost_cents),money(r.mark_value_cents),r.mark_status]));
+  const reason=b.budget.entry_status;
+  const showLine=ui.equityAccount==='bankroll'?'':button('View bankroll chart','btc-bankroll-open',{kind:'inline'});
+  return `<div data-bankroll-id="${esc(b.id)}">${panel('My paper bankroll',`<div class="bankroll-choice"><label class="btc-filter" for="bankroll-profile">Starting balance and market<select id="bankroll-profile"${ui.locked||positions.length?' disabled':''}>${choices}</select></label>${showLine}</div>
+    ${note(switchNote)}<dl class="bankroll-values">${fields}</dl>
+    ${note('Each entry can use up to 5% of marked equity, including fees. Total open cost is capped at 10%. The daily limit uses the Eastern opening balance.')}
+    ${reason?note(reason):''}
+    ${holds.length?table(['Open contract','Side','Held','Cost','Marked value','Status'],holds,'My bankroll positions'):''}
+    ${fills.length?`<details><summary>Recent bankroll fills</summary>${table(['Time','Action','Contracts','Price','Fee','Cash change'],fills,'My bankroll fills')}</details>`:note('No fills recorded for this bankroll yet.')}`,control)}</div>`;
+}
 function portfolio(state,ui) {
   const balances=products.map(v=>{
     const p=brokerFor(state,v)?.portfolio||{};
@@ -48,14 +75,14 @@ function portfolio(state,ui) {
   });
   const positions=products.flatMap(v=>arr(brokerFor(state,v)?.positions).filter(p=>Number(p.qty)>0).map(p=>
     cells(venues[v].label,[p.title||p.market_id,String(p.side).toUpperCase(),count(p.qty),money(p.cost_cents),money(p.mark_value_cents),human(p.mark_status)||dash,stamp(p.close_at)])));
-  return `<div class="btc-workspace">${portfolioChart(state,ui,'bitcoin')}${panel('Contract accounts',table(['Paper account','Cash','Marked equity','Open cost','Realized','Net gain / loss','Fills'],balances,'Independent Bitcoin contract accounts')+note('Each venue and interval uses its own ledger. A missing mark leaves equity and net gain unavailable.'))}
+  return `<div class="btc-workspace">${portfolioChart(state,ui,'bitcoin')}${bankrollPanel(state,ui)}${panel('$10,000 comparison accounts',table(['Paper account','Cash','Marked equity','Open cost','Realized','Net gain / loss','Fills'],balances,'Independent Bitcoin contract accounts')+note('Each comparison trial has its own ledger. A missing mark leaves equity and net gain unavailable.'))}
     ${panel('Open contract positions',positions.length ? table(['Account','Contract','Outcome','Held','Cost','Marked value','Mark status','Close'],positions,'Open Bitcoin contract positions') :
       note('There are no open Bitcoin contract positions.'))}${trialPerformance(state)}${bitcoinAccount(state.bitcoin||{})}</div>`;
 }
 function activities(state) {
   const entries=[];
-  for(const v of products) {
-    const b=brokerFor(state,v)||{},events=arr(b.activity),fills=arr(b.fills);
+  for(const v of [...products,'bankroll']) {
+    const b=(v==='bankroll'?state.bankroll:brokerFor(state,v))||{},events=arr(b.activity),fills=arr(b.fills);
     const ids=new Set();
     for(const item of [...events,...fills]) {
       const e={...item.data,...item};
@@ -75,11 +102,12 @@ function activities(state) {
   return entries.sort((a,b)=>b.when-a.when);
 }
 function activity(state,ui) {
-  const choices=[['all','All Bitcoin products'],...products.map(v=>[v,venues[v].label]),['spot','Bitstamp spot']];
+  const choices=[['all','All Bitcoin products'],['bankroll','My paper bankroll'],...products.map(v=>[v,venues[v].label]),['spot','Bitstamp spot']];
+  const names=Object.fromEntries(choices);
   const active=choices.some(([v])=>v===ui.btcActivityFilter)?ui.btcActivityFilter:'all';
   const select=`<label class="btc-filter">Product<select id="btc-activity-filter">${choices.map(([v,l])=>`<option value="${v}"${v===active?' selected':''}>${esc(l)}</option>`).join('')}</select></label>`;
   const rows=activities(state).filter(e=>active==='all'||e.product===active).map(e=>
-    cells(stamp(e.when),[e.product==='spot'?'Bitstamp spot':venues[e.product].label,e.kind,e.origin,e.detail,e.fee,e.id||dash]));
+    cells(stamp(e.when),[names[e.product],e.kind,e.origin,e.detail,e.fee,e.id||dash]));
   return `<div class="btc-workspace">${panel('Recent Bitcoin receipts',rows.length?table(['Time','Paper account','Receipt','Origin','Details','Fee','Reference'],rows,'Bitcoin paper activity'):note('No receipts have been recorded for the selected product.'),select)}</div>`;
 }
 function worker(state,ui) {

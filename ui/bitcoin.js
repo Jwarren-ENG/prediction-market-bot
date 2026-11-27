@@ -311,8 +311,9 @@ export function bitcoinView(state,ui) {
     `<button type="button" role="tab" id="btc-tab-${key}" data-action="btc-panel" data-value="${key}" aria-selected="${active===key}" aria-controls="btc-view-${key}" tabindex="${active===key ? 0 : -1}">${label}</button>`).join('')}</div>`;
   const body = spot ? spot.body : contractMonitor(state,ui,venue);
   let controls=spot?.controls || (brokerFor(state,venue) ? contractAuto(state,ui,venue):'');
+  if (state.bankroll) controls+=button('My paper bankroll','btc-bankroll-open',{kind:'secondary'});
   if (spot || brokerFor(state,venue)) controls+=button('Paper order','btc-ticket-jump',{value:spot?'spot':venue,kind:'secondary',extraClass:'btc-jump'});
-  return `${headline('Bitcoin markets',spot ? 'BTC / USD <span class="context-divider">/</span> Spot paper trading' : `${spec.name} <span class="context-divider">/</span> ${spec.minutes}-minute prediction markets`,controls)}${tabs}
+  return `${headline('Bitcoin markets',spot ? 'BTC / USD <span class="context-divider">/</span> Spot paper trading' : `${spec.name} <span class="context-divider">/</span> ${spec.minutes}-minute prediction markets · $10,000 trial`,controls)}${tabs}
     ${panels.map(([key])=>`<div id="btc-view-${key}" role="tabpanel" aria-labelledby="btc-tab-${key}"${active===key ? ' tabindex="0"' : ' hidden'}>${active===key ? body : ''}</div>`).join('')}`;
 }
 export function optionsView() {

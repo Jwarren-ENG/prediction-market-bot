@@ -106,6 +106,70 @@ class BrokerTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.paper = broker.BTCBroker(self.dir)
 
+    def test_personal_size_fits_whole_contracts_with_fees_and_resizes_with_equity(self):
+        for initial, qty, fee in ((2500, 1, 2), (5000, 3, 5), (10000, 7, 12)):
+            with self.subTest(starting_cents=initial):
+                paper = broker.BTCBroker(self.dir, starting_cents=initial)
+                q = feed(yes=((62, 40),), no=((36, 40),), changes=((-20, 51, 53), (-10, 57, 59), (0, 62, 64)))
+                paper.sync(q, now=T)
+                paper.set_auto(True)
+                paper.sync(q, now=T + timedelta(seconds=1))
+                paper.sync(q, now=T + timedelta(seconds=2))
+                state = paper.state(T + timedelta(seconds=2), equity_minutes=15)
+                self.assertEqual(len(state["fills"]), 1)
+                fill = state["fills"][0]
+                self.assertEqual((fill["qty"], fill["fee_cents"], fill["entry_budget_cents"]), (qty, fee, initial // 20))
+                self.assertEqual(state["portfolio"]["cash_cents"], initial - 64 * qty - fee)
+                self.assertEqual(state["portfolio_history"]["points"][0][1], initial)
+                self.assertEqual(state["portfolio_history"]["account"], "bankroll")
+                self.assertLess(state["limits"]["max_order_cents"], initial // 20)
+                paper.set_auto(False)
+                end = START + timedelta(minutes=15)
+                paper.sync({}, [settled("kalshi", end)], now=end)
+                restored = broker.BTCBroker(self.dir, starting_cents=initial).state(end)
+                gain = (100 - 64) * qty - fee
+                self.assertEqual(restored["portfolio"]["net_gain_cents"], gain)
+                self.assertEqual(restored["limits"]["max_order_cents"], (initial + gain) // 20)
+                self.assertFalse(restored["auto_enabled"])
+        self.assertEqual(self.paper.state(T)["portfolio"]["cash_cents"], broker.INITIAL)
+
+    def test_fee_rounding_reduces_a_two_lot_and_pause_keeps_exit_working(self):
+        paper = broker.BTCBroker(self.dir, starting_cents=2500)
+        paper.set_auto(True)
+        q = feed(yes=((60, 40),), no=((38, 40),), changes=((-20, 47, 49), (-10, 53, 55), (0, 60, 62)))
+        paper.sync(q, now=T)
+        fill = paper.state(T)["fills"][0]
+        self.assertEqual((fill["qty"], fill["cash_amount_cents"]), (1, 64))
+        paper.set_auto(False)
+        later = T + timedelta(seconds=10)
+        paper.sync(feed(now=later, yes=((48, 40),), no=((50, 40),)), now=later)
+        self.assertFalse(paper.has_holdings())
+        self.assertEqual(paper.state(later)["fills"][0]["action"], "sell")
+        self.assertEqual(paper.state(later)["portfolio"]["net_gain_cents"], -18)
+
+    def test_personal_loss_room_can_rule_out_every_contract_and_resets_each_eastern_day(self):
+        paper = broker.BTCBroker(self.dir, starting_cents=2500)
+        paper.set_auto(True)
+        for i in range(4):
+            opened = START + timedelta(minutes=15 * i)
+            now = opened + timedelta(minutes=1)
+            q = feed(opened=opened, now=now, yes=((62, 40),), no=((36, 40),),
+                     changes=((-20, 51, 53), (-10, 57, 59), (0, 62, 64)))
+            paper.sync(q, now=now)
+            self.assertEqual(paper.has_holdings(), i < 3)
+            end = opened + timedelta(minutes=15)
+            paper.sync({}, (settled("kalshi", end, opened=opened, result="NO"),), now=end)
+        state = paper.state(end)
+        self.assertEqual(state["portfolio"]["net_gain_cents"], -198)
+        self.assertEqual(state["budget"]["entry_room_cents"], 52)
+        self.assertEqual(state["limits"]["daily_loss_cents"], 250)
+        self.assertEqual(state["performance"]["max_drawdown_cents"], 198)
+        next_day = START + timedelta(days=1)
+        paper.sync({}, now=next_day)
+        renewed = paper.state(next_day)
+        self.assertEqual(renewed["limits"]["daily_loss_cents"], 230)
+        self.assertEqual(renewed["budget"]["entry_room_cents"], 115)
+
     def test_portfolio_chart_moves_on_a_new_bid_between_fills(self):
         self.paper.sync(feed(), now=T)
         self.paper.place(order(), feed(), T + timedelta(seconds=1))

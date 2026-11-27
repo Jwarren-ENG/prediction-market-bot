@@ -173,6 +173,25 @@ test('Bitcoin portfolio, research, activity and independent comparison tab disti
   const compare=comparisonView({...state,comparison:{accounts:{},bitcoin_managed:true}},ui);assert.match(compare,/Bitcoin contract trials/);assert.match(compare,/managed spot account includes manual/);assert.doesNotMatch(compare,/data-btc-risk|data-btc-ticket/);
 });
 
+test('personal bankroll controls show the selected small account and its own fee-inclusive exposure', async () => {
+  const {state,ui}=bitcoinAccounts(), {bitcoinAccountView}=await import('../ui/bitcoin-account.js');
+  state.bankroll={id:'kalshi:2500',venue:'kalshi',auto_enabled:true,starting_options_cents:[2500,5000,10000],
+    portfolio:{initial_cash_cents:2500,cash_cents:2500,equity_cents:2500,net_gain_cents:0,open_cost_cents:0,positions:[]},
+    budget:{entry_room_cents:125,daily_room_cents:250,entry_status:'Waiting for three fresh books.'},limits:{max_order_cents:125,daily_loss_cents:250}};
+  const view=()=>bitcoinAccountView(state,{...ui,connected:true,locked:false,btcView:'Portfolio',equityAccount:'bankroll'});
+  let html=view();
+  assert.match(html,/data-bankroll-id="kalshi:2500"/);
+  assert.match(html,/data-action="btc-bankroll-auto"[^>]+aria-checked="true"/);
+  assert.match(html,/value="kalshi:2500" selected/);
+  assert.match(html,/value="polymarket_us_hourly:10000"/);
+  assert.ok(html.includes('$1.25') && html.includes('$2.50') && html.includes('Waiting for three fresh books.'));
+  assert.match(html,/No fills recorded for this bankroll yet/);
+  state.bankroll.portfolio.positions=[{market_id:'a',side:'yes',qty:1}];
+  html=view();
+  assert.match(html,/id="bankroll-profile" disabled/);
+  assert.match(html,/My bankroll positions/);
+});
+
 test('portfolio line uses dollar equity, signed period return and separate segments', async () => {
   const {equityPlot,portfolioChart} = await import('../ui/portfolio-chart.js');
   const end=Date.UTC(2026,10,26,21), beginning=end-120000;
